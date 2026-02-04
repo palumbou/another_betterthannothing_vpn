@@ -1895,17 +1895,15 @@ cmd_start() {
         exit 1
     fi
     
-    # Retrieve stack outputs to get InstanceId
+    # Retrieve instance ID (handles both on-demand and Spot Fleet)
     echo "Retrieving stack information..."
-    local stack_outputs
-    stack_outputs=$(get_stack_outputs "$STACK_NAME" "$REGION")
-    
-    # Extract instance ID from outputs
     local instance_id
-    instance_id=$(echo "$stack_outputs" | jq -r '.InstanceId // empty')
+    instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION")
     
-    if [ -z "$instance_id" ]; then
-        echo "Error: Failed to retrieve InstanceId from stack outputs" >&2
+    if [ -z "$instance_id" ] || [ "$instance_id" = "spot-fleet-managed" ]; then
+        echo "Error: Failed to retrieve InstanceId from stack" >&2
+        echo "" >&2
+        echo "If using Spot Fleet, the instance may not be running yet." >&2
         exit 1
     fi
     
@@ -2050,17 +2048,15 @@ cmd_stop() {
         exit 1
     fi
     
-    # Retrieve stack outputs to get InstanceId
+    # Retrieve instance ID (handles both on-demand and Spot Fleet)
     echo "Retrieving stack information..."
-    local stack_outputs
-    stack_outputs=$(get_stack_outputs "$STACK_NAME" "$REGION")
-    
-    # Extract instance ID from outputs
     local instance_id
-    instance_id=$(echo "$stack_outputs" | jq -r '.InstanceId // empty')
+    instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION")
     
-    if [ -z "$instance_id" ]; then
-        echo "Error: Failed to retrieve InstanceId from stack outputs" >&2
+    if [ -z "$instance_id" ] || [ "$instance_id" = "spot-fleet-managed" ]; then
+        echo "Error: Failed to retrieve InstanceId from stack" >&2
+        echo "" >&2
+        echo "If using Spot Fleet, the instance may not be running yet." >&2
         exit 1
     fi
     
@@ -2207,12 +2203,19 @@ cmd_status() {
     local stack_outputs
     stack_outputs=$(get_stack_outputs "$STACK_NAME" "$REGION")
     
-    # Extract key outputs
+    # Extract key outputs (use helper for instance_id to handle Spot Fleet)
     local instance_id
-    instance_id=$(echo "$stack_outputs" | jq -r '.InstanceId // "N/A"')
+    instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION")
+    if [ -z "$instance_id" ]; then
+        instance_id="N/A"
+    fi
     
+    # Get public IP (use helper to handle Spot Fleet)
     local public_ip
-    public_ip=$(echo "$stack_outputs" | jq -r '.PublicIp // "N/A"')
+    public_ip=$(get_public_ip_from_stack "$STACK_NAME" "$REGION")
+    if [ -z "$public_ip" ]; then
+        public_ip="N/A"
+    fi
     
     local vpc_id
     vpc_id=$(echo "$stack_outputs" | jq -r '.VpcId // "N/A"')
@@ -2239,7 +2242,7 @@ cmd_status() {
     echo ""
     
     # Query instance status if we have an instance ID
-    if [ "$instance_id" != "N/A" ]; then
+    if [ "$instance_id" != "N/A" ] && [ "$instance_id" != "spot-fleet-managed" ]; then
         echo "=== Instance Status ==="
         
         local instance_info
@@ -2522,12 +2525,12 @@ cmd_add_client() {
     local stack_outputs
     stack_outputs=$(get_stack_outputs "$STACK_NAME" "$REGION")
     
-    # Extract necessary outputs
+    # Extract necessary outputs (use helpers for instance_id and public_ip to handle Spot Fleet)
     local instance_id
-    instance_id=$(echo "$stack_outputs" | jq -r '.InstanceId // empty')
+    instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION")
     
     local public_ip
-    public_ip=$(echo "$stack_outputs" | jq -r '.PublicIp // empty')
+    public_ip=$(get_public_ip_from_stack "$STACK_NAME" "$REGION")
     
     local vpn_port
     vpn_port=$(echo "$stack_outputs" | jq -r '.VpnPort // "51820"')
@@ -2535,8 +2538,10 @@ cmd_add_client() {
     local vpc_cidr
     vpc_cidr=$(echo "$stack_outputs" | jq -r '.VpcCidr // "10.10.0.0/16"')
     
-    if [ -z "$instance_id" ] || [ -z "$public_ip" ]; then
+    if [ -z "$instance_id" ] || [ "$instance_id" = "spot-fleet-managed" ] || [ -z "$public_ip" ] || [ "$public_ip" = "spot-fleet-managed" ]; then
         echo "Error: Failed to retrieve required stack outputs (InstanceId, PublicIp)" >&2
+        echo "" >&2
+        echo "If using Spot Fleet, the instance may not be running yet." >&2
         exit 1
     fi
     
@@ -2739,17 +2744,16 @@ cmd_ssm() {
         exit 1
     fi
     
-    # Retrieve stack outputs
+    # Retrieve instance ID (handles both on-demand and Spot Fleet)
     echo "Retrieving stack information..."
-    local outputs
-    outputs=$(get_stack_outputs "$STACK_NAME" "$REGION")
-    
-    # Extract InstanceId
     local instance_id
-    instance_id=$(echo "$outputs" | jq -r '.InstanceId // empty')
+    instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION")
     
-    if [ -z "$instance_id" ]; then
-        echo "Error: Failed to retrieve InstanceId from stack outputs" >&2
+    if [ -z "$instance_id" ] || [ "$instance_id" = "spot-fleet-managed" ]; then
+        echo "Error: Failed to retrieve InstanceId from stack" >&2
+        echo "" >&2
+        echo "If using Spot Fleet, the instance may not be running yet." >&2
+        echo "Check the Spot Fleet status in AWS Console." >&2
         exit 1
     fi
     
