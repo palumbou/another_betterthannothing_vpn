@@ -333,6 +333,29 @@ validate_vpc_cidr() {
     echo "$cidr"
 }
 
+# Detect CPU architecture from instance type
+# Returns 'arm64' for Graviton instances (t4g, m6g, c6g, etc.)
+# Returns 'x86_64' for Intel/AMD instances (t3, m5, c5, etc.)
+detect_instance_architecture() {
+    local instance_type="$1"
+    
+    # Extract instance family (e.g., t4g from t4g.nano)
+    local instance_family
+    instance_family=$(echo "$instance_type" | cut -d'.' -f1)
+    
+    # ARM64 (Graviton) instance families end with 'g' and have specific patterns
+    # t4g, m6g, m6gd, c6g, c6gd, r6g, r6gd, x2gd, etc.
+    # Also includes a1 instances
+    case "$instance_family" in
+        t4g|m6g|m6gd|m7g|m7gd|c6g|c6gd|c7g|c7gd|r6g|r6gd|r7g|r7gd|x2gd|im4gn|is4gen|i4g|hpc7g|a1)
+            echo "arm64"
+            ;;
+        *)
+            echo "x86_64"
+            ;;
+    esac
+}
+
 # Detect operator's public IP address
 detect_my_ip() {
     local detected_ip=""
@@ -438,6 +461,82 @@ get_stack_outputs() {
     
     # Return the outputs JSON
     echo "$outputs"
+}
+
+# Get instance ID from stack (handles both on-demand and spot fleet)
+# Parameters: stack_name, region
+# Returns: instance_id or empty string
+get_instance_id_from_stack() {
+    local stack_name="$1"
+    local region="$2"
+    
+    # Get stack outputs
+    local stack_outputs
+    stack_outputs=$(get_stack_outputs "$stack_name" "$region")
+    
+    # First try to get InstanceId directly (on-demand case)
+    local instance_id
+    instance_id=$(echo "$stack_outputs" | jq -r '.InstanceId // empty')
+    
+    # If instance_id is "spot-fleet-managed" or empty, try to get from Spot Fleet
+    if [ -z "$instance_id" ] || [ "$instance_id" = "spot-fleet-managed" ]; then
+        # Try to get SpotFleetId
+        local spot_fleet_id
+        spot_fleet_id=$(echo "$stack_outputs" | jq -r '.SpotFleetId // empty')
+        
+        if [ -n "$spot_fleet_id" ]; then
+            # Get instances from Spot Fleet
+            local fleet_instances
+            fleet_instances=$(aws ec2 describe-spot-fleet-instances \
+                --spot-fleet-request-id "$spot_fleet_id" \
+                --region "$region" \
+                --output json 2>/dev/null || echo '{"ActiveInstances":[]}')
+            
+            # Get first active instance
+            instance_id=$(echo "$fleet_instances" | jq -r '.ActiveInstances[0].InstanceId // empty')
+        fi
+    fi
+    
+    echo "$instance_id"
+}
+
+# Get public IP from stack (handles both on-demand and spot fleet)
+# Parameters: stack_name, region
+# Returns: public_ip or empty string
+get_public_ip_from_stack() {
+    local stack_name="$1"
+    local region="$2"
+    
+    # Get stack outputs
+    local stack_outputs
+    stack_outputs=$(get_stack_outputs "$stack_name" "$region")
+    
+    # First try to get PublicIp directly (on-demand case)
+    local public_ip
+    public_ip=$(echo "$stack_outputs" | jq -r '.PublicIp // empty')
+    
+    # If public_ip is "spot-fleet-managed" or empty, try to get from instance
+    if [ -z "$public_ip" ] || [ "$public_ip" = "spot-fleet-managed" ]; then
+        # Get instance ID
+        local instance_id
+        instance_id=$(get_instance_id_from_stack "$stack_name" "$region")
+        
+        if [ -n "$instance_id" ]; then
+            # Get public IP from instance
+            public_ip=$(aws ec2 describe-instances \
+                --instance-ids "$instance_id" \
+                --region "$region" \
+                --query 'Reservations[0].Instances[0].PublicIpAddress' \
+                --output text 2>/dev/null || echo "")
+            
+            # Handle "None" response
+            if [ "$public_ip" = "None" ]; then
+                public_ip=""
+            fi
+        fi
+    fi
+    
+    echo "$public_ip"
 }
 
 # Wait for SSM agent to be ready on the instance
@@ -1295,10 +1394,16 @@ cmd_create() {
     # CLOUDFORMATION STACK CREATION PHASE
     # ============================================================
     
+    # Detect instance architecture from instance type
+    local instance_arch
+    instance_arch=$(detect_instance_architecture "$INSTANCE_TYPE")
+    echo "Detected architecture for $INSTANCE_TYPE: $instance_arch"
+    
     # Prepare CloudFormation parameters array
     local cf_parameters=(
         "ParameterKey=VpcCidr,ParameterValue=$validated_vpc_cidr"
         "ParameterKey=InstanceType,ParameterValue=$INSTANCE_TYPE"
+        "ParameterKey=InstanceArchitecture,ParameterValue=$instance_arch"
         "ParameterKey=VpnPort,ParameterValue=51820"
         "ParameterKey=VpnProtocol,ParameterValue=udp"
         "ParameterKey=AllowedIngressCidr,ParameterValue=$allowed_ingress_cidr"
@@ -1446,13 +1551,42 @@ cmd_create() {
     local stack_outputs
     stack_outputs=$(get_stack_outputs "$STACK_NAME" "$REGION")
     
-    # Extract instance ID from outputs
-    local instance_id
-    instance_id=$(echo "$stack_outputs" | jq -r '.InstanceId // empty')
-    
-    if [ -z "$instance_id" ]; then
-        echo "Error: Failed to retrieve InstanceId from stack outputs" >&2
-        exit 1
+    # For Spot Fleet, we need to wait for the instance to be launched
+    if [ "$USE_SPOT" = "true" ]; then
+        echo "Waiting for Spot Fleet instance to be launched..."
+        local spot_wait_attempts=0
+        local max_spot_wait=30  # 30 attempts * 10 seconds = 5 minutes
+        local instance_id=""
+        
+        while [ $spot_wait_attempts -lt $max_spot_wait ]; do
+            spot_wait_attempts=$((spot_wait_attempts + 1))
+            instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION")
+            
+            if [ -n "$instance_id" ] && [ "$instance_id" != "spot-fleet-managed" ]; then
+                echo "✓ Spot instance launched: $instance_id"
+                break
+            fi
+            
+            echo "  Attempt $spot_wait_attempts/$max_spot_wait: Waiting for Spot instance..."
+            sleep 10
+        done
+        
+        if [ -z "$instance_id" ] || [ "$instance_id" = "spot-fleet-managed" ]; then
+            echo "Error: Spot Fleet instance did not launch within timeout" >&2
+            echo "" >&2
+            echo "Check Spot Fleet status in AWS Console or try again later." >&2
+            exit 1
+        fi
+    else
+        # On-demand instance - get directly from outputs
+        local instance_id
+        instance_id=$(echo "$stack_outputs" | jq -r '.InstanceId // empty')
+        
+        if [ -z "$instance_id" ] || [ "$instance_id" = "spot-fleet-managed" ]; then
+            echo "Error: Failed to retrieve InstanceId from stack outputs" >&2
+            exit 1
+        fi
+    fi
     fi
     
     echo "Instance ID: $instance_id"
@@ -1471,12 +1605,17 @@ cmd_create() {
     
     # Extract necessary outputs for bootstrap
     local public_ip
-    public_ip=$(echo "$stack_outputs" | jq -r '.PublicIp // empty')
+    if [ "$USE_SPOT" = "true" ]; then
+        # For Spot Fleet, get public IP from instance
+        public_ip=$(get_public_ip_from_stack "$STACK_NAME" "$REGION")
+    else
+        public_ip=$(echo "$stack_outputs" | jq -r '.PublicIp // empty')
+    fi
     
     local vpn_port
     vpn_port=$(echo "$stack_outputs" | jq -r '.VpnPort // "51820"')
     
-    if [ -z "$public_ip" ]; then
+    if [ -z "$public_ip" ] || [ "$public_ip" = "spot-fleet-managed" ]; then
         echo "Error: Failed to retrieve PublicIp from stack outputs" >&2
         exit 1
     fi

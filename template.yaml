@@ -6,13 +6,21 @@ Parameters:
     Type: String
     Default: '10.10.0.0/16'
     Description: 'CIDR block for the VPC (must be RFC 1918 private range)'
-    AllowedPattern: '^(10\.(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){2}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/(1[6-9]|2[0-8])|172\.(1[6-9]|2[0-9]|3[0-1])\.(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){1}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/(1[6-9]|2[0-8])|192\.168\.(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){1}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/(1[6-9]|2[0-8]))$'
+    AllowedPattern: '^(10\.(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){2}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/(1[6-9]|2[0-8])|172\.(1[6-9]|2[0-9]|3[0-1])\.(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){1}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/(1[6-9]|2[0-8])|192\.168\.(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){1}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/(1[6-9]|2[0-8]))'
     ConstraintDescription: 'Must be a valid RFC 1918 private CIDR block with prefix length between /16 and /28'
 
   InstanceType:
     Type: String
     Default: 't4g.nano'
     Description: 'EC2 instance type for the VPN server'
+
+  InstanceArchitecture:
+    Type: String
+    Default: 'arm64'
+    Description: 'CPU architecture for the instance (arm64 for t4g/m6g/c6g, x86_64 for t3/m5/c5)'
+    AllowedValues:
+      - 'arm64'
+      - 'x86_64'
 
   VpnPort:
     Type: Number
@@ -33,7 +41,7 @@ Parameters:
     Type: String
     Default: '0.0.0.0/0'
     Description: 'Source CIDR allowed to connect to the VPN port (use --my-ip for better security)'
-    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}'
     ConstraintDescription: 'Must be a valid CIDR block (e.g., 203.0.113.0/24 or 0.0.0.0/0)'
 
   UseSpotInstance:
@@ -47,14 +55,16 @@ Parameters:
   AllocateEIP:
     Type: String
     Default: 'false'
-    Description: 'Allocate an Elastic IP for persistent public IP address (recommended to avoid IP changes on stop/start)'
+    Description: 'Allocate an Elastic IP for persistent public IP address'
     AllowedValues:
       - 'true'
       - 'false'
 
 Conditions:
   UseSpot: !Equals [!Ref UseSpotInstance, 'true']
+  UseOnDemand: !Not [!Equals [!Ref UseSpotInstance, 'true']]
   ShouldAllocateEIP: !Equals [!Ref AllocateEIP, 'true']
+  IsArm64: !Equals [!Ref InstanceArchitecture, 'arm64']
 
 Resources:
   VPC:
@@ -169,55 +179,117 @@ Resources:
       Roles:
         - !Ref VpnInstanceRole
 
-  VpnInstance:
-    Type: AWS::EC2::Instance
+  # Launch Template for Spot instances
+  VpnLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
     Properties:
-      # Use SSM parameter to get latest Amazon Linux 2023 AMI (ARM64 for t4g, x86_64 for others)
-      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
-      InstanceType: !Ref InstanceType
-      IamInstanceProfile: !Ref VpnInstanceProfile
-      SecurityGroupIds:
-        - !Ref VpnSecurityGroup
+      LaunchTemplateName: !Sub '${AWS::StackName}-launch-template'
+      LaunchTemplateData:
+        ImageId: !If
+          - IsArm64
+          - '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
+          - '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt VpnInstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref VpnSecurityGroup
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 8
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            
+            # Update SSM agent if needed
+            dnf install -y amazon-ssm-agent || yum install -y amazon-ssm-agent
+            systemctl enable amazon-ssm-agent
+            systemctl start amazon-ssm-agent
+            
+            # Set hostname
+            hostnamectl set-hostname ${AWS::StackName}-vpn-server
+            
+            # Log completion
+            echo "UserData script completed successfully" > /var/log/userdata-complete.log
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${AWS::StackName}-vpn-server'
+              - Key: CostCenter
+                Value: !Ref AWS::StackName
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub '${AWS::StackName}-vpn-volume'
+              - Key: CostCenter
+                Value: !Ref AWS::StackName
+
+  # On-demand instance (when UseSpot is false)
+  VpnInstanceOnDemand:
+    Type: AWS::EC2::Instance
+    Condition: UseOnDemand
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref VpnLaunchTemplate
+        Version: !GetAtt VpnLaunchTemplate.LatestVersionNumber
       SubnetId: !Ref PublicSubnet
-      # Conditional Spot instance configuration
-      InstanceMarketOptions: !If
-        - UseSpot
-        - MarketType: spot
-          SpotOptions:
-            SpotInstanceType: one-time
-            InstanceInterruptionBehavior: terminate
-        - !Ref AWS::NoValue
-      # IMDSv2 enforcement
-      MetadataOptions:
-        HttpTokens: required
-        HttpPutResponseHopLimit: 1
-      # Encrypted root volume
-      BlockDeviceMappings:
-        - DeviceName: /dev/xvda
-          Ebs:
-            VolumeSize: 8
-            VolumeType: gp3
-            Encrypted: true
-            DeleteOnTermination: true
-      # Minimal UserData script
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euo pipefail
-          
-          # Update SSM agent if needed
-          dnf install -y amazon-ssm-agent || yum install -y amazon-ssm-agent
-          systemctl enable amazon-ssm-agent
-          systemctl start amazon-ssm-agent
-          
-          # Set hostname
-          hostnamectl set-hostname ${AWS::StackName}-vpn-server
-          
-          # Log completion
-          echo "UserData script completed successfully" > /var/log/userdata-complete.log
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-vpn-server'
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  # Spot Fleet for Spot instances (when UseSpot is true)
+  VpnSpotFleet:
+    Type: AWS::EC2::SpotFleet
+    Condition: UseSpot
+    Properties:
+      SpotFleetRequestConfigData:
+        IamFleetRole: !GetAtt SpotFleetRole.Arn
+        TargetCapacity: 1
+        TerminateInstancesWithExpiration: false
+        Type: maintain
+        LaunchTemplateConfigs:
+          - LaunchTemplateSpecification:
+              LaunchTemplateId: !Ref VpnLaunchTemplate
+              Version: !GetAtt VpnLaunchTemplate.LatestVersionNumber
+            Overrides:
+              - SubnetId: !Ref PublicSubnet
+        TagSpecifications:
+          - ResourceType: spot-fleet-request
+            Tags:
+              - Key: Name
+                Value: !Sub '${AWS::StackName}-spot-fleet'
+              - Key: CostCenter
+                Value: !Ref AWS::StackName
+
+  # IAM Role for Spot Fleet
+  SpotFleetRole:
+    Type: AWS::IAM::Role
+    Condition: UseSpot
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-spot-fleet-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: spotfleet.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetTaggingRole'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-spot-fleet-role'
         - Key: CostCenter
           Value: !Ref AWS::StackName
 
@@ -232,26 +304,44 @@ Resources:
         - Key: CostCenter
           Value: !Ref AWS::StackName
 
-  VpnEIPAssociation:
+  # EIP Association for On-Demand instance
+  VpnEIPAssociationOnDemand:
     Type: AWS::EC2::EIPAssociation
     Condition: ShouldAllocateEIP
+    DependsOn: VpnInstanceOnDemand
     Properties:
       AllocationId: !GetAtt VpnEIP.AllocationId
-      InstanceId: !Ref VpnInstance
+      InstanceId: !If
+        - UseOnDemand
+        - !Ref VpnInstanceOnDemand
+        - !Ref AWS::NoValue
 
 Outputs:
   InstanceId:
-    Description: 'EC2 instance ID of the VPN server'
-    Value: !Ref VpnInstance
+    Description: 'EC2 instance ID of the VPN server (for on-demand instances)'
+    Value: !If
+      - UseOnDemand
+      - !Ref VpnInstanceOnDemand
+      - 'spot-fleet-managed'
     Export:
       Name: !Sub '${AWS::StackName}-InstanceId'
 
+  SpotFleetId:
+    Description: 'Spot Fleet Request ID (for spot instances)'
+    Condition: UseSpot
+    Value: !Ref VpnSpotFleet
+    Export:
+      Name: !Sub '${AWS::StackName}-SpotFleetId'
+
   PublicIp:
-    Description: 'Public IP address of the VPN server (Elastic IP if allocated, otherwise standard public IP)'
+    Description: 'Public IP address of the VPN server'
     Value: !If
-      - ShouldAllocateEIP
-      - !Ref VpnEIP
-      - !GetAtt VpnInstance.PublicIp
+      - UseOnDemand
+      - !If
+        - ShouldAllocateEIP
+        - !Ref VpnEIP
+        - !GetAtt VpnInstanceOnDemand.PublicIp
+      - 'spot-fleet-managed'
     Export:
       Name: !Sub '${AWS::StackName}-PublicIp'
 
@@ -290,3 +380,9 @@ Outputs:
     Value: !Ref VpnProtocol
     Export:
       Name: !Sub '${AWS::StackName}-VpnProtocol'
+
+  InstanceArchitecture:
+    Description: 'CPU architecture of the instance'
+    Value: !Ref InstanceArchitecture
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceArchitecture'
