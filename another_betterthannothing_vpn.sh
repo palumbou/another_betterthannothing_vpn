@@ -1008,7 +1008,7 @@ generate_client_config() {
     # The private key is never logged to stdout/stderr - it only appears in the .conf file
     local client_config="[Interface]
 PrivateKey = $client_private_key
-Address = 10.99.0.$client_id/24
+Address = 10.99.0.$client_id/32
 DNS = 1.1.1.1
 
 [Peer]
