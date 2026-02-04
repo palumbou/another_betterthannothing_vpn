@@ -28,6 +28,7 @@ A disposable VPN infrastructure on AWS with minimal attack surface and complete 
 - [Security Best Practices](#security-best-practices)
 - [Cost Considerations](#cost-considerations)
 - [Examples](#examples)
+- [Execution Logs](#execution-logs)
 - [Troubleshooting](#troubleshooting)
 - [Cleanup](#cleanup)
 
@@ -1084,6 +1085,57 @@ psql -h 10.10.1.x -U postgres
 # When done, delete everything
 exit
 ./another_betterthannothing_vpn.sh delete --name abthn-vpn-20260201-a3f9 --yes
+```
+
+## Execution Logs
+
+The script automatically saves execution logs to track stack information across different script runs. This is useful for:
+- Recovering stack information after a session ends
+- Tracking the status of created stacks
+- Finding the correct output directory when deleting stacks
+
+### Log Location
+
+Execution logs are saved in the output directory (default: `./another_betterthannothing_vpn_config/`) as `execution_log.json`.
+
+### Log Contents
+
+The log file contains an array of entries, one per stack:
+
+```json
+[
+  {
+    "stack_name": "abthn-vpn-20260204-x1y2",
+    "region": "eu-west-1",
+    "status": "READY",
+    "last_updated": "2026-02-04T10:30:00Z",
+    "output_dir": "/home/user/vpn",
+    "additional_info": "VPN setup complete, 2 client(s) configured"
+  }
+]
+```
+
+### Status Values
+
+- `CREATING` - Stack creation initiated
+- `CREATE_COMPLETE` - CloudFormation stack created successfully
+- `CREATE_FAILED` - Stack creation failed
+- `READY` - VPN fully configured and ready to use
+- `DELETED` - Stack has been deleted
+
+### Using Logs for Recovery
+
+If you need to find information about a previously created stack:
+
+```bash
+# View all logged stacks
+cat ./another_betterthannothing_vpn_config/execution_log.json | jq '.'
+
+# Find a specific stack
+cat ./another_betterthannothing_vpn_config/execution_log.json | jq '.[] | select(.stack_name == "abthn-vpn-20260204-x1y2")'
+
+# List all stacks with their status
+cat ./another_betterthannothing_vpn_config/execution_log.json | jq '.[] | {name: .stack_name, status: .status, region: .region}'
 ```
 
 ## Troubleshooting

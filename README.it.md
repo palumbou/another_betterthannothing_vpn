@@ -28,6 +28,7 @@ Un'infrastruttura VPN usa e getta su AWS con superficie di attacco minima e auto
 - [Best Practice di Sicurezza](#best-practice-di-sicurezza)
 - [Considerazioni sui Costi](#considerazioni-sui-costi)
 - [Esempi](#esempi)
+- [Log di Esecuzione](#log-di-esecuzione)
 - [Risoluzione dei Problemi](#risoluzione-dei-problemi)
 - [Pulizia](#pulizia)
 
@@ -1094,6 +1095,56 @@ exit
 ./another_betterthannothing_vpn.sh delete --name abthn-vpn-20260201-a3f9 --yes
 ```
 
+## Log di Esecuzione
+
+Lo script salva automaticamente i log di esecuzione per tracciare le informazioni degli stack tra diverse esecuzioni. Questo è utile per:
+- Recuperare informazioni sugli stack dopo la fine di una sessione
+- Tracciare lo stato degli stack creati
+- Trovare la directory di output corretta quando si eliminano gli stack
+
+### Posizione dei Log
+
+I log di esecuzione vengono salvati nella directory di output (predefinita: `./another_betterthannothing_vpn_config/`) come `execution_log.json`.
+
+### Contenuto dei Log
+
+Il file di log contiene un array di voci, una per stack:
+
+```json
+[
+  {
+    "stack_name": "abthn-vpn-20260204-x1y2",
+    "region": "eu-west-1",
+    "status": "READY",
+    "last_updated": "2026-02-04T10:30:00Z",
+    "output_dir": "/home/user/vpn",
+    "additional_info": "VPN setup complete, 2 client(s) configured"
+  }
+]
+```
+
+### Valori di Stato
+
+- `CREATING` - Creazione dello stack avviata
+- `CREATE_COMPLETE` - Stack CloudFormation creato con successo
+- `CREATE_FAILED` - Creazione dello stack fallita
+- `READY` - VPN completamente configurata e pronta all'uso
+- `DELETED` - Stack eliminato
+
+### Usare i Log per il Recupero
+
+Se hai bisogno di trovare informazioni su uno stack creato in precedenza:
+
+```bash
+# Visualizza tutti gli stack registrati
+cat ./another_betterthannothing_vpn_config/execution_log.json | jq '.'
+
+# Trova uno stack specifico
+cat ./another_betterthannothing_vpn_config/execution_log.json | jq '.[] | select(.stack_name == "abthn-vpn-20260204-x1y2")'
+
+# Elenca tutti gli stack con il loro stato
+cat ./another_betterthannothing_vpn_config/execution_log.json | jq '.[] | {name: .stack_name, status: .status, region: .region}'
+```
 
 ## Risoluzione dei Problemi
 
