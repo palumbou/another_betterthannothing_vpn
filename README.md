@@ -298,6 +298,7 @@ Create a new VPN stack with all infrastructure and configuration.
 - `--instance-type <type>` - EC2 instance type (default: t4g.nano)
 - `--spot` - Use EC2 Spot instances for lower cost (can be interrupted)
 - `--eip` - Allocate an Elastic IP for persistent public IP address
+- `--reach-server` - Include VPN server subnet (10.99.0.0/24) in client AllowedIPs, allowing clients to reach services running on the VPN server itself (e.g., Docker containers)
 - `--clients <n>` - Number of initial client configs to generate (default: 1)
 - `--output-dir <path>` - Output directory for client configs (default: ./another_betterthannothing_vpn_config)
 - `--yes` - Skip confirmation prompts
@@ -321,6 +322,9 @@ Create a new VPN stack with all infrastructure and configuration.
 
 # Create VPN with Elastic IP (persistent IP address)
 ./another_betterthannothing_vpn.sh create --my-ip --eip
+
+# Create VPN with access to server itself (for Docker containers, etc.)
+./another_betterthannothing_vpn.sh create --my-ip --reach-server
 ```
 
 #### `delete`

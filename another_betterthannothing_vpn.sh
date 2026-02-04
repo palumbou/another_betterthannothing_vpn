@@ -918,7 +918,7 @@ WGEOF"
 }
 
 # Generate client configuration
-# Parameters: stack_name, client_name, client_id, mode, vpc_cidr, endpoint, port, server_public_key, instance_id, region, output_dir
+# Parameters: stack_name, client_name, client_id, mode, vpc_cidr, endpoint, port, server_public_key, instance_id, region, output_dir, reach_server
 generate_client_config() {
     local stack_name="$1"
     local client_name="$2"
@@ -931,6 +931,7 @@ generate_client_config() {
     local instance_id="$9"
     local region="${10}"
     local output_dir="${11}"
+    local reach_server="${12:-false}"
     
     echo "Generating client configuration: $client_name (10.99.0.$client_id/32)..."
     
@@ -994,13 +995,18 @@ generate_client_config() {
     fi
     
     # Step 4: Create client config file with [Interface] and [Peer] sections
-    # Set AllowedIPs based on mode
+    # Set AllowedIPs based on mode and reach_server option
     local allowed_ips
     if [ "$mode" = "full" ]; then
         allowed_ips="0.0.0.0/0, ::/0"
     else
         # split-tunnel mode - only route VPC CIDR
-        allowed_ips="$vpc_cidr"
+        if [ "$reach_server" = "true" ]; then
+            # Include VPN subnet to reach the server itself (e.g., for Docker containers)
+            allowed_ips="$vpc_cidr, 10.99.0.0/24"
+        else
+            allowed_ips="$vpc_cidr"
+        fi
     fi
     
     # Build client configuration
@@ -1095,6 +1101,9 @@ OPTIONS:
                                 (lower cost but can be interrupted)
     --eip                       Allocate an Elastic IP for persistent public IP
                                 (recommended to avoid IP changes on stop/start)
+    --reach-server              Include VPN server in AllowedIPs (10.99.0.0/24)
+                                Allows clients to reach services on the VPN server
+                                itself (e.g., Docker containers, local services)
     --clients <n>               Number of initial clients (default: 1)
     --output-dir <path>         Output directory (default: ./another_betterthannothing_vpn_config)
     --yes, --non-interactive    Skip confirmations
@@ -1152,6 +1161,9 @@ EXAMPLES:
     # Create VPN with Elastic IP (persistent IP address)
     ./another_betterthannothing_vpn.sh create --my-ip --eip
 
+    # Create VPN with access to server itself (for Docker, etc.)
+    ./another_betterthannothing_vpn.sh create --my-ip --reach-server
+
     # Stop VPN instance to save costs (keeps infrastructure)
     ./another_betterthannothing_vpn.sh stop --name my-vpn
 
@@ -1194,6 +1206,7 @@ parse_args() {
     NUM_CLIENTS=1
     OUTPUT_DIR="${DEFAULT_OUTPUT_DIR}"
     NON_INTERACTIVE=false
+    REACH_SERVER=false
 
     # Check if no arguments provided
     if [ $# -eq 0 ]; then
@@ -1252,6 +1265,10 @@ parse_args() {
                 OUTPUT_DIR="$2"
                 shift 2
                 ;;
+            --reach-server)
+                REACH_SERVER=true
+                shift
+                ;;
             --yes|--non-interactive)
                 NON_INTERACTIVE=true
                 shift
@@ -1269,7 +1286,7 @@ parse_args() {
     done
 
     # Export variables for use in command functions
-    export COMMAND REGION STACK_NAME MODE USE_MY_IP VPC_CIDR INSTANCE_TYPE USE_SPOT ALLOCATE_EIP NUM_CLIENTS OUTPUT_DIR NON_INTERACTIVE
+    export COMMAND REGION STACK_NAME MODE USE_MY_IP VPC_CIDR INSTANCE_TYPE USE_SPOT ALLOCATE_EIP NUM_CLIENTS OUTPUT_DIR NON_INTERACTIVE REACH_SERVER
     export ALLOWED_CIDRS
 }
 
@@ -1666,7 +1683,8 @@ cmd_create() {
             "$server_public_key" \
             "$instance_id" \
             "$REGION" \
-            "$OUTPUT_DIR"; then
+            "$OUTPUT_DIR" \
+            "$REACH_SERVER"; then
             client_count=$((client_count + 1))
         else
             echo "Warning: Failed to generate client config for $client_name" >&2
@@ -1681,6 +1699,7 @@ cmd_create() {
   \"stack_name\": \"$STACK_NAME\",
   \"region\": \"$REGION\",
   \"mode\": \"$MODE\",
+  \"reach_server\": $REACH_SERVER,
   \"server_endpoint\": \"$public_ip:$vpn_port\",
   \"vpc_cidr\": \"$validated_vpc_cidr\",
   \"created_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
@@ -2577,6 +2596,14 @@ cmd_add_client() {
     local mode
     mode=$(echo "$metadata" | jq -r '.mode // "split"')
     
+    # Extract reach_server from metadata (use command line flag if specified, otherwise from metadata)
+    local reach_server
+    if [ "$REACH_SERVER" = "true" ]; then
+        reach_server="true"
+    else
+        reach_server=$(echo "$metadata" | jq -r '.reach_server // false')
+    fi
+    
     # Extract existing clients count to determine next client ID
     local existing_client_count
     existing_client_count=$(echo "$metadata" | jq -r '.clients | length')
@@ -2638,7 +2665,8 @@ cmd_add_client() {
         "$server_public_key" \
         "$instance_id" \
         "$REGION" \
-        "$OUTPUT_DIR"; then
+        "$OUTPUT_DIR" \
+        "$reach_server"; then
         echo "" >&2
         echo "Error: Failed to generate client configuration" >&2
         exit 1
