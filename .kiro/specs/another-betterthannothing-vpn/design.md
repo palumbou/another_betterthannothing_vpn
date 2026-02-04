@@ -141,6 +141,7 @@ The system uses two distinct CIDR parameters with different purposes:
 - `VpnProtocol` (String, default: "udp"): Protocol for VPN traffic
 - `AllowedIngressCidr` (String, default: "0.0.0.0/0"): Source CIDR allowed to connect to VPN port (Security Group ingress rule)
 - `UseSpotInstance` (String, default: "false"): Use EC2 Spot instances for lower cost (can be interrupted)
+- `AllocateEIP` (String, default: "false"): Allocate an Elastic IP for persistent public IP address
 
 **Resources:**
 - `VPC`: AWS::EC2::VPC with EnableDnsHostnames and EnableDnsSupport
@@ -161,15 +162,22 @@ The system uses two distinct CIDR parameters with different purposes:
   - UserData: Minimal bootstrap (install SSM agent if needed, set hostname)
   - MetadataOptions: HttpTokens=required (IMDSv2), HttpPutResponseHopLimit=1
   - BlockDeviceMappings: Encrypted EBS volume
+- `VpnEIP`: AWS::EC2::EIP (conditional, created only when AllocateEIP=true)
+  - Domain: vpc
+  - Tags: costcenter tag
+- `VpnEIPAssociation`: AWS::EC2::EIPAssociation (conditional, created only when AllocateEIP=true)
+  - AllocationId: !GetAtt VpnEIP.AllocationId
+  - InstanceId: !Ref VpnInstance
 
 **Outputs:**
 - `InstanceId`: EC2 instance ID
-- `PublicIp`: Public IP address of instance
+- `PublicIp`: Public IP address of instance (EIP if AllocateEIP=true, otherwise standard public IP)
 - `VpcId`: VPC ID
 - `VpcCidr`: VPC CIDR block
 - `Region`: AWS region
 - `VpnPort`: VPN listening port
 - `VpnProtocol`: VPN protocol
+- `HasElasticIP`: Boolean indicating whether an Elastic IP was allocated
 
 **Tagging Strategy:**
 All resources include:
@@ -242,6 +250,7 @@ Options:
   --vpc-cidr <cidr>           VPC CIDR block (default: 10.10.0.0/16, must be RFC 1918 private range)
   --instance-type <type>      EC2 instance type (default: t4g.nano)
   --spot                      Use EC2 Spot instances (lower cost, can be interrupted)
+  --eip                       Allocate an Elastic IP (persistent public IP address)
   --clients <n>               Number of initial clients (default: 1)
   --output-dir <path>         Output directory (default: ~/.another-vpn)
   --yes, --non-interactive    Skip confirmations
@@ -286,14 +295,15 @@ exec nix-shell -p awscli2 session-manager-plugin jq --run "$0 $*"
 4. If --my-ip is set, detect public IP via `curl -s https://api.ipify.org` or `dig +short myip.opendns.com @resolver1.opendns.com`
 5. Generate stack name if not provided
 6. Check if stack already exists (fail if yes)
-7. Prepare CloudFormation parameters (including VpcCidr if custom)
-8. Create stack with tags: `aws cloudformation create-stack --tags Key=costcenter,Value=<stack-name>`
-9. Wait for completion: `aws cloudformation wait stack-create-complete`
-10. Retrieve outputs: `aws cloudformation describe-stacks`
-11. Wait for SSM agent ready: poll `aws ssm describe-instance-information`
-12. Bootstrap VPN server: `bootstrap_vpn_server()`
-13. Generate client configs: `generate_client_config()` × N
-14. Display connection instructions
+7. Prepare CloudFormation parameters (including VpcCidr if custom, AllocateEIP based on --eip flag)
+8. If --eip flag is NOT set, display warning: "WARNING: Without an Elastic IP, the public IP address will change if you stop and start the instance. Use --eip to allocate a persistent IP address."
+9. Create stack with tags: `aws cloudformation create-stack --tags Key=costcenter,Value=<stack-name>`
+10. Wait for completion: `aws cloudformation wait stack-create-complete`
+11. Retrieve outputs: `aws cloudformation describe-stacks`
+12. Wait for SSM agent ready: poll `aws ssm describe-instance-information`
+13. Bootstrap VPN server: `bootstrap_vpn_server()`
+14. Generate client configs: `generate_client_config()` × N
+15. Display connection instructions
 
 **`bootstrap_vpn_server()`**
 1. Generate server private/public key pair
@@ -585,6 +595,16 @@ This section defines the correctness properties that must hold for the another_b
 
 **Test Strategy:** Parse the CloudFormation template, locate the IAM::Role resource, extract ManagedPolicyArns, and verify it contains only the SSM policy ARN.
 
+### Property 11: Elastic IP Conditional Creation
+
+*For any* CloudFormation template with AllocateEIP parameter set to true, the template SHALL contain an AWS::EC2::EIP resource and an AWS::EC2::EIPAssociation resource, and when AllocateEIP is false, these resources SHALL NOT be present in the created stack.
+
+**Validates: Requirements 10.2, 10.3, 10.4**
+
+**Rationale:** Elastic IP resources should only be created when explicitly requested to avoid unnecessary costs. The conditional logic must work correctly.
+
+**Test Strategy:** Parse the CloudFormation template with AllocateEIP=true and verify EIP and EIPAssociation resources exist with proper Condition attributes. Verify the PublicIp output correctly references either the EIP or the instance's public IP based on the condition.
+
 ### Edge Cases and Error Conditions
 
 The following edge cases will be covered by unit tests (not property-based tests):
@@ -603,6 +623,8 @@ The following edge cases will be covered by unit tests (not property-based tests
 - **IP detection service unavailable:** Verify script tries fallback and fails gracefully with helpful message
 - **Operator behind NAT/proxy:** Verify detected IP is the public-facing IP, not internal IP
 - **IPv6-only environments:** Verify script handles IPv6 addresses correctly with /128 suffix
+- **No --eip flag:** Verify script displays warning about IP address changes on stop/start (Requirement 10.6)
+- **EIP with Spot instances:** Document that EIP persists even if Spot instance is interrupted, and will be reassociated on restart
 
 
 ## Error Handling
@@ -929,6 +951,16 @@ The testing strategy employs a dual approach combining unit tests and property-b
 - Test script does not display private keys in stdout
 - Test script displays security warning for 0.0.0.0/0
 - Test script displays detected IP when --my-ip is used
+- Test script displays warning when --eip is NOT used (Requirement 10.6)
+
+**12. Elastic IP Tests**
+- Test --eip flag sets AllocateEIP parameter to "true"
+- Test without --eip flag sets AllocateEIP parameter to "false"
+- Test CloudFormation template creates EIP resources when AllocateEIP=true
+- Test CloudFormation template does NOT create EIP resources when AllocateEIP=false
+- Test PublicIp output references EIP when AllocateEIP=true
+- Test PublicIp output references instance public IP when AllocateEIP=false
+- Test EIP has costcenter tag applied
 
 ### Integration Testing
 

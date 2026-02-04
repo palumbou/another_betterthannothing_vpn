@@ -44,8 +44,17 @@ Parameters:
       - 'true'
       - 'false'
 
+  AllocateEIP:
+    Type: String
+    Default: 'false'
+    Description: 'Allocate an Elastic IP for persistent public IP address (recommended to avoid IP changes on stop/start)'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
 Conditions:
   UseSpot: !Equals [!Ref UseSpotInstance, 'true']
+  ShouldAllocateEIP: !Equals [!Ref AllocateEIP, 'true']
 
 Resources:
   VPC:
@@ -212,6 +221,24 @@ Resources:
         - Key: costcenter
           Value: !Ref AWS::StackName
 
+  VpnEIP:
+    Type: AWS::EC2::EIP
+    Condition: ShouldAllocateEIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-eip'
+        - Key: costcenter
+          Value: !Ref AWS::StackName
+
+  VpnEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Condition: ShouldAllocateEIP
+    Properties:
+      AllocationId: !GetAtt VpnEIP.AllocationId
+      InstanceId: !Ref VpnInstance
+
 Outputs:
   InstanceId:
     Description: 'EC2 instance ID of the VPN server'
@@ -220,10 +247,19 @@ Outputs:
       Name: !Sub '${AWS::StackName}-InstanceId'
 
   PublicIp:
-    Description: 'Public IP address of the VPN server'
-    Value: !GetAtt VpnInstance.PublicIp
+    Description: 'Public IP address of the VPN server (Elastic IP if allocated, otherwise standard public IP)'
+    Value: !If
+      - ShouldAllocateEIP
+      - !Ref VpnEIP
+      - !GetAtt VpnInstance.PublicIp
     Export:
       Name: !Sub '${AWS::StackName}-PublicIp'
+
+  HasElasticIP:
+    Description: 'Boolean indicating whether an Elastic IP was allocated'
+    Value: !Ref AllocateEIP
+    Export:
+      Name: !Sub '${AWS::StackName}-HasElasticIP'
 
   VpcId:
     Description: 'VPC ID'

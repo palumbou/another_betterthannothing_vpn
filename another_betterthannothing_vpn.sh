@@ -69,6 +69,41 @@ check_dependencies() {
         return 1
     fi
     
+    # Verify AWS credentials are configured (only for commands that need them)
+    # Skip this check for help command
+    local needs_aws_creds=true
+    for arg in "$@"; do
+        if [[ "$arg" == "help" ]] || [[ "$arg" == "--help" ]]; then
+            needs_aws_creds=false
+            break
+        fi
+    done
+    
+    if [ "$needs_aws_creds" = true ]; then
+        # Quick check if AWS credentials are available
+        if ! aws sts get-caller-identity --output json > /dev/null 2>&1; then
+            echo "Error: AWS credentials are not configured or are invalid" >&2
+            echo "" >&2
+            echo "Please configure your AWS credentials using one of these methods:" >&2
+            echo "" >&2
+            echo "  1. Run 'aws configure' and provide your credentials:" >&2
+            echo "     aws configure" >&2
+            echo "" >&2
+            echo "  2. Set environment variables:" >&2
+            echo "     export AWS_ACCESS_KEY_ID=your_access_key" >&2
+            echo "     export AWS_SECRET_ACCESS_KEY=your_secret_key" >&2
+            echo "     export AWS_DEFAULT_REGION=us-east-1" >&2
+            echo "" >&2
+            echo "  3. Use AWS SSO:" >&2
+            echo "     aws sso login --profile your-profile" >&2
+            echo "" >&2
+            echo "For more information, see:" >&2
+            echo "  https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html" >&2
+            echo "" >&2
+            return 1
+        fi
+    fi
+    
     return 0
 }
 
@@ -419,19 +454,29 @@ execute_remote_command() {
     
     # Use SSM Send-Command API for non-interactive commands
     local command_id
-    if ! command_id=$(aws ssm send-command \
+    local send_output
+    if ! send_output=$(aws ssm send-command \
         --instance-ids "$instance_id" \
         --document-name "AWS-RunShellScript" \
         --parameters "commands=[\"$command\"]" \
         --timeout-seconds "$timeout" \
         --region "$region" \
-        --output json 2>&1 | jq -r '.Command.CommandId // empty'); then
+        --output json 2>&1); then
         echo "Error: Failed to send command to instance $instance_id" >&2
+        echo "AWS CLI error: $send_output" >&2
+        echo "" >&2
+        echo "Possible causes:" >&2
+        echo "  - Instance is not running or SSM agent is not ready" >&2
+        echo "  - Insufficient IAM permissions (ssm:SendCommand required)" >&2
+        echo "  - Network connectivity issues" >&2
         return 1
     fi
     
+    command_id=$(echo "$send_output" | jq -r '.Command.CommandId // empty')
+    
     if [ -z "$command_id" ]; then
         echo "Error: Failed to get command ID from SSM send-command" >&2
+        echo "Response: $send_output" >&2
         return 1
     fi
     
@@ -445,11 +490,21 @@ execute_remote_command() {
         
         # Get command invocation status
         local invocation
-        invocation=$(aws ssm get-command-invocation \
+        if ! invocation=$(aws ssm get-command-invocation \
             --command-id "$command_id" \
             --instance-id "$instance_id" \
             --region "$region" \
-            --output json 2>/dev/null || echo '{}')
+            --output json 2>&1); then
+            # If we can't get the invocation, wait and retry
+            if [ $attempt -lt $max_wait ]; then
+                sleep 2
+                continue
+            else
+                echo "Error: Failed to get command invocation status" >&2
+                echo "AWS CLI error: $invocation" >&2
+                return 1
+            fi
+        fi
         
         status=$(echo "$invocation" | jq -r '.Status // "Pending"')
         
@@ -461,8 +516,14 @@ execute_remote_command() {
             # Command failed
             local error_output
             error_output=$(echo "$invocation" | jq -r '.StandardErrorContent // "No error output"')
-            echo "Error: Command failed with status: $status" >&2
+            echo "Error: Remote command failed with status: $status" >&2
+            echo "Command: $command" >&2
             echo "Error output: $error_output" >&2
+            echo "" >&2
+            echo "Troubleshooting:" >&2
+            echo "  - Check SSM agent logs: sudo journalctl -u amazon-ssm-agent" >&2
+            echo "  - Verify instance has internet connectivity" >&2
+            echo "  - Try connecting via SSM: ./another_betterthannothing_vpn.sh ssm --name \$STACK_NAME" >&2
             return 1
         fi
         
@@ -472,6 +533,8 @@ execute_remote_command() {
     
     # Timeout waiting for command
     echo "Error: Timeout waiting for command to complete (command ID: $command_id)" >&2
+    echo "Command may still be running. Check status in AWS Console or via:" >&2
+    echo "  aws ssm get-command-invocation --command-id $command_id --instance-id $instance_id --region $region" >&2
     return 1
 }
 
@@ -489,31 +552,53 @@ bootstrap_vpn_server() {
     echo ""
     
     # Step 1: Install wireguard-tools
-    echo "Installing WireGuard tools..."
+    echo "[1/7] Installing WireGuard tools..."
     if ! execute_remote_command "$instance_id" "$region" \
         "sudo dnf install -y wireguard-tools" 300; then
+        echo "" >&2
         echo "Error: Failed to install wireguard-tools" >&2
+        echo "" >&2
+        echo "Possible causes:" >&2
+        echo "  - Package repository is unavailable" >&2
+        echo "  - Instance has no internet connectivity" >&2
+        echo "  - Insufficient disk space" >&2
+        echo "" >&2
+        echo "Next steps:" >&2
+        echo "  - Connect via SSM to troubleshoot: ./another_betterthannothing_vpn.sh ssm --name \$STACK_NAME" >&2
+        echo "  - Check system logs: sudo journalctl -xe" >&2
         return 1
     fi
-    echo "✓ WireGuard tools installed"
+    echo "      ✓ WireGuard tools installed"
     echo ""
     
     # Step 2: Generate server WireGuard keys
-    echo "Generating server WireGuard keys..."
+    echo "[2/7] Generating server WireGuard keys..."
     local server_private_key
     if ! server_private_key=$(execute_remote_command "$instance_id" "$region" \
         "wg genkey | sudo tee /etc/wireguard/server_private.key" 60); then
+        echo "" >&2
         echo "Error: Failed to generate server private key" >&2
+        echo "" >&2
+        echo "This may indicate WireGuard tools were not installed correctly." >&2
+        echo "Try connecting via SSM to troubleshoot: ./another_betterthannothing_vpn.sh ssm --name \$STACK_NAME" >&2
         return 1
     fi
     
-    # Remove any trailing whitespace/newlines
+    # Remove any trailing whitespace/newlines and ensure key is not logged
     server_private_key=$(echo "$server_private_key" | tr -d '\n\r' | xargs)
+    
+    # Validate key format (should be base64, 44 characters)
+    if [ ${#server_private_key} -ne 44 ]; then
+        echo "" >&2
+        echo "Error: Generated private key has unexpected format (length: ${#server_private_key}, expected: 44)" >&2
+        return 1
+    fi
     
     # Generate and retrieve server public key
     local server_public_key
     if ! server_public_key=$(execute_remote_command "$instance_id" "$region" \
         "sudo cat /etc/wireguard/server_private.key | wg pubkey | sudo tee /etc/wireguard/server_public.key" 60); then
+        echo "" >&2
         echo "Error: Failed to generate server public key" >&2
         return 1
     fi
@@ -521,22 +606,30 @@ bootstrap_vpn_server() {
     # Remove any trailing whitespace/newlines
     server_public_key=$(echo "$server_public_key" | tr -d '\n\r' | xargs)
     
-    echo "✓ Server keys generated"
-    echo "  Public key: $server_public_key"
+    # Validate public key format
+    if [ ${#server_public_key} -ne 44 ]; then
+        echo "" >&2
+        echo "Error: Generated public key has unexpected format (length: ${#server_public_key}, expected: 44)" >&2
+        return 1
+    fi
+    
+    echo "      ✓ Server keys generated"
+    echo "      Public key: $server_public_key"
     echo ""
     
     # Step 3: Set proper permissions on key files
-    echo "Setting key file permissions..."
+    echo "[3/7] Setting key file permissions..."
     if ! execute_remote_command "$instance_id" "$region" \
         "sudo chmod 600 /etc/wireguard/server_private.key /etc/wireguard/server_public.key" 60; then
+        echo "" >&2
         echo "Error: Failed to set key file permissions" >&2
         return 1
     fi
-    echo "✓ Key file permissions set"
+    echo "      ✓ Key file permissions set (600)"
     echo ""
     
     # Step 4: Create WireGuard configuration file
-    echo "Creating WireGuard configuration..."
+    echo "[4/7] Creating WireGuard configuration..."
     
     # Build the configuration file content
     local wg_config="[Interface]
@@ -549,6 +642,9 @@ PrivateKey = $server_private_key"
         wg_config="$wg_config
 PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE"
+        echo "      Mode: Full-tunnel (NAT enabled)"
+    else
+        echo "      Mode: Split-tunnel (no NAT)"
     fi
     
     # Write configuration file
@@ -560,6 +656,7 @@ $wg_config
 WGEOF"
     
     if ! execute_remote_command "$instance_id" "$region" "$create_config_cmd" 60; then
+        echo "" >&2
         echo "Error: Failed to create WireGuard configuration file" >&2
         return 1
     fi
@@ -567,19 +664,21 @@ WGEOF"
     # Set proper permissions on config file
     if ! execute_remote_command "$instance_id" "$region" \
         "sudo chmod 600 /etc/wireguard/wg0.conf" 60; then
+        echo "" >&2
         echo "Error: Failed to set config file permissions" >&2
         return 1
     fi
     
-    echo "✓ WireGuard configuration created"
+    echo "      ✓ WireGuard configuration created"
     echo ""
     
     # Step 5: Enable IP forwarding
-    echo "Enabling IP forwarding..."
+    echo "[5/7] Enabling IP forwarding..."
     
     # Enable IP forwarding immediately
     if ! execute_remote_command "$instance_id" "$region" \
         "sudo sysctl -w net.ipv4.ip_forward=1" 60; then
+        echo "" >&2
         echo "Error: Failed to enable IP forwarding" >&2
         return 1
     fi
@@ -587,49 +686,63 @@ WGEOF"
     # Persist IP forwarding setting
     if ! execute_remote_command "$instance_id" "$region" \
         "echo 'net.ipv4.ip_forward = 1' | sudo tee /etc/sysctl.d/99-wireguard.conf > /dev/null" 60; then
+        echo "" >&2
         echo "Error: Failed to persist IP forwarding setting" >&2
         return 1
     fi
     
-    echo "✓ IP forwarding enabled and persisted"
+    echo "      ✓ IP forwarding enabled and persisted"
     echo ""
     
     # Step 6: Start and enable WireGuard service
-    echo "Starting WireGuard service..."
+    echo "[6/7] Starting WireGuard service..."
     
     if ! execute_remote_command "$instance_id" "$region" \
         "sudo systemctl enable --now wg-quick@wg0" 120; then
+        echo "" >&2
         echo "Error: Failed to start WireGuard service" >&2
+        echo "" >&2
+        echo "Troubleshooting:" >&2
+        echo "  - Check service status: sudo systemctl status wg-quick@wg0" >&2
+        echo "  - Check service logs: sudo journalctl -u wg-quick@wg0" >&2
+        echo "  - Verify configuration: sudo wg-quick up wg0" >&2
         return 1
     fi
     
-    echo "✓ WireGuard service started and enabled"
+    echo "      ✓ WireGuard service started and enabled"
     echo ""
     
     # Step 7: Verify service is running
-    echo "Verifying WireGuard service status..."
+    echo "[7/7] Verifying WireGuard service status..."
     
     local service_status
     if ! service_status=$(execute_remote_command "$instance_id" "$region" \
         "sudo systemctl is-active wg-quick@wg0" 60); then
+        echo "" >&2
         echo "Error: WireGuard service is not active" >&2
         echo "Service status: $service_status" >&2
+        echo "" >&2
+        echo "Check service logs:" >&2
+        echo "  ./another_betterthannothing_vpn.sh ssm --name \$STACK_NAME" >&2
+        echo "  sudo journalctl -u wg-quick@wg0 -n 50" >&2
         return 1
     fi
     
     # Check if service is active
     if [ "$(echo "$service_status" | tr -d '\n\r' | xargs)" != "active" ]; then
+        echo "" >&2
         echo "Error: WireGuard service is not active (status: $service_status)" >&2
         return 1
     fi
     
-    echo "✓ WireGuard service is active and running"
+    echo "      ✓ WireGuard service is active and running"
     echo ""
     
     echo "=== VPN Server Bootstrap Complete ==="
     echo ""
     
     # Store server public key for later use (return it)
+    # Note: Private key is never returned or logged
     echo "$server_public_key"
     return 0
 }
@@ -655,17 +768,26 @@ generate_client_config() {
     local client_private_key
     if ! client_private_key=$(execute_remote_command "$instance_id" "$region" \
         "wg genkey" 60); then
+        echo "" >&2
         echo "Error: Failed to generate client private key for $client_name" >&2
         return 1
     fi
     
-    # Remove any trailing whitespace/newlines
+    # Remove any trailing whitespace/newlines and ensure key is not logged
     client_private_key=$(echo "$client_private_key" | tr -d '\n\r' | xargs)
+    
+    # Validate key format
+    if [ ${#client_private_key} -ne 44 ]; then
+        echo "" >&2
+        echo "Error: Generated client private key has unexpected format (length: ${#client_private_key}, expected: 44)" >&2
+        return 1
+    fi
     
     # Generate client public key from private key
     local client_public_key
     if ! client_public_key=$(execute_remote_command "$instance_id" "$region" \
         "echo '$client_private_key' | wg pubkey" 60); then
+        echo "" >&2
         echo "Error: Failed to generate client public key for $client_name" >&2
         return 1
     fi
@@ -673,17 +795,30 @@ generate_client_config() {
     # Remove any trailing whitespace/newlines
     client_public_key=$(echo "$client_public_key" | tr -d '\n\r' | xargs)
     
+    # Validate public key format
+    if [ ${#client_public_key} -ne 44 ]; then
+        echo "" >&2
+        echo "Error: Generated client public key has unexpected format (length: ${#client_public_key}, expected: 44)" >&2
+        return 1
+    fi
+    
     # Step 2: Add peer to server config
     echo "  Adding peer to server configuration..."
     if ! execute_remote_command "$instance_id" "$region" \
         "sudo wg set wg0 peer $client_public_key allowed-ips 10.99.0.$client_id/32" 60; then
+        echo "" >&2
         echo "Error: Failed to add peer to server config for $client_name" >&2
+        echo "" >&2
+        echo "Troubleshooting:" >&2
+        echo "  - Verify WireGuard service is running: sudo systemctl status wg-quick@wg0" >&2
+        echo "  - Check WireGuard interface: sudo wg show" >&2
         return 1
     fi
     
     # Step 3: Save server config
     if ! execute_remote_command "$instance_id" "$region" \
         "sudo wg-quick save wg0" 60; then
+        echo "" >&2
         echo "Error: Failed to save server config for $client_name" >&2
         return 1
     fi
@@ -699,6 +834,8 @@ generate_client_config() {
     fi
     
     # Build client configuration
+    # Note: Private key is included in config file (this is expected and required for WireGuard clients)
+    # The private key is never logged to stdout/stderr - it only appears in the .conf file
     local client_config="[Interface]
 PrivateKey = $client_private_key
 Address = 10.99.0.$client_id/24
@@ -713,24 +850,39 @@ PersistentKeepalive = 25"
     # Step 5: Create output directory
     local client_dir="$output_dir/$stack_name/clients"
     if ! mkdir -p "$client_dir" 2>/dev/null; then
+        echo "" >&2
         echo "Error: Failed to create output directory: $client_dir" >&2
+        echo "" >&2
+        echo "Possible causes:" >&2
+        echo "  - Insufficient permissions" >&2
+        echo "  - Disk full" >&2
+        echo "  - Invalid path" >&2
+        echo "" >&2
+        echo "Try specifying a different output directory with --output-dir" >&2
         return 1
     fi
     
     # Step 6: Write config to file
     local config_file="$client_dir/$client_name.conf"
     if ! echo "$client_config" > "$config_file" 2>/dev/null; then
+        echo "" >&2
         echo "Error: Failed to write client config file: $config_file" >&2
+        echo "" >&2
+        echo "Possible causes:" >&2
+        echo "  - Insufficient permissions" >&2
+        echo "  - Disk full" >&2
         return 1
     fi
     
     # Step 7: Set file permissions to 600
     if ! chmod 600 "$config_file" 2>/dev/null; then
-        echo "Error: Failed to set permissions on config file: $config_file" >&2
-        return 1
+        echo "" >&2
+        echo "Warning: Failed to set permissions on config file: $config_file" >&2
+        echo "Please manually set permissions: chmod 600 $config_file" >&2
+        # Don't fail - file was created successfully
     fi
     
-    echo "✓ Client configuration saved: $config_file"
+    echo "  ✓ Client configuration saved: $config_file"
     
     return 0
 }
@@ -1066,7 +1218,8 @@ cmd_create() {
     )
     
     # Build CloudFormation create-stack command
-    echo "Creating stack '$STACK_NAME' in region '$REGION'..."
+    echo "Creating CloudFormation stack '$STACK_NAME' in region '$REGION'..."
+    echo ""
     
     # Execute create-stack command with parameters and tags
     local create_output
@@ -1078,8 +1231,20 @@ cmd_create() {
         --tags "Key=costcenter,Value=$STACK_NAME" \
         --region "$REGION" \
         --output json 2>&1); then
+        echo "" >&2
         echo "Error: Failed to create CloudFormation stack" >&2
+        echo "" >&2
+        echo "AWS CLI error:" >&2
         echo "$create_output" >&2
+        echo "" >&2
+        echo "Common causes:" >&2
+        echo "  - Insufficient IAM permissions (cloudformation:CreateStack, iam:PassRole required)" >&2
+        echo "  - Template file not found or invalid: $TEMPLATE_FILE" >&2
+        echo "  - Invalid parameter values" >&2
+        echo "  - Service limits exceeded (VPC limit, EIP limit, etc.)" >&2
+        echo "" >&2
+        echo "Verify your AWS credentials and permissions:" >&2
+        echo "  aws sts get-caller-identity" >&2
         exit 1
     fi
     
@@ -1088,10 +1253,39 @@ cmd_create() {
     stack_id=$(echo "$create_output" | jq -r '.StackId // empty')
     
     if [ -n "$stack_id" ]; then
-        echo "Stack creation initiated. Stack ID: $stack_id"
+        echo "✓ Stack creation initiated"
+        echo "  Stack ID: $stack_id"
     fi
     
-    echo "Waiting for stack creation to complete (this may take 3-5 minutes)..."
+    echo ""
+    echo "Waiting for stack creation to complete..."
+    echo "This typically takes 3-5 minutes (creating VPC, subnet, IGW, EC2 instance, etc.)"
+    echo ""
+    
+    # Show progress while waiting
+    local wait_start=$(date +%s)
+    local dots=0
+    
+    # Start the wait in background and show progress
+    (
+        while true; do
+            # Check stack status
+            local current_status
+            current_status=$(aws cloudformation describe-stacks \
+                --stack-name "$STACK_NAME" \
+                --region "$REGION" \
+                --output json 2>/dev/null | jq -r '.Stacks[0].StackStatus // "UNKNOWN"')
+            
+            if [[ "$current_status" == "CREATE_COMPLETE" ]]; then
+                exit 0
+            elif [[ "$current_status" == *"FAILED"* ]] || [[ "$current_status" == "ROLLBACK_"* ]]; then
+                exit 1
+            fi
+            
+            sleep 10
+        done
+    ) &
+    local progress_pid=$!
     
     # Wait for stack creation to complete with timeout
     # The wait command has a built-in timeout of 120 attempts * 30 seconds = 1 hour
@@ -1099,29 +1293,50 @@ cmd_create() {
         --stack-name "$STACK_NAME" \
         --region "$REGION" 2>&1; then
         
+        # Kill progress indicator
+        kill $progress_pid 2>/dev/null || true
+        wait $progress_pid 2>/dev/null || true
+        
         # Stack creation failed - retrieve and display failed events
         echo "" >&2
-        echo "Error: Stack creation failed" >&2
+        echo "✗ Stack creation failed" >&2
         echo "" >&2
-        echo "Failed events:" >&2
         
         # Get stack events and filter for failed resources
+        echo "Failed events:" >&2
         local failed_events
-        failed_events=$(aws cloudformation describe-stack-events \
+        if failed_events=$(aws cloudformation describe-stack-events \
             --stack-name "$STACK_NAME" \
             --region "$REGION" \
-            --output json 2>/dev/null | \
-            jq -r '.StackEvents[] | select(.ResourceStatus | contains("FAILED")) | 
-                "\(.Timestamp) - \(.ResourceType) (\(.LogicalResourceId)): \(.ResourceStatusReason // "No reason provided")"' 2>/dev/null || echo "Unable to retrieve stack events")
+            --output json 2>/dev/null); then
+            
+            echo "$failed_events" | jq -r '.StackEvents[] | select(.ResourceStatus | contains("FAILED")) | 
+                "  [\(.Timestamp)] \(.ResourceType) (\(.LogicalResourceId)):\n    \(.ResourceStatusReason // "No reason provided")\n"' 2>/dev/null || \
+                echo "  Unable to parse stack events" >&2
+        else
+            echo "  Unable to retrieve stack events" >&2
+        fi
         
-        echo "$failed_events" >&2
+        echo "" >&2
+        echo "Troubleshooting:" >&2
+        echo "  - Check AWS CloudFormation console for detailed error information" >&2
+        echo "  - Verify service limits (VPCs, EIPs, EC2 instances) in your account" >&2
+        echo "  - Check if the instance type '$INSTANCE_TYPE' is available in region '$REGION'" >&2
         echo "" >&2
         echo "To clean up the failed stack, run:" >&2
         echo "  ./another_betterthannothing_vpn.sh delete --name $STACK_NAME --region $REGION --yes" >&2
         exit 1
     fi
     
-    echo "✓ Stack creation complete!"
+    # Kill progress indicator
+    kill $progress_pid 2>/dev/null || true
+    wait $progress_pid 2>/dev/null || true
+    
+    local wait_end=$(date +%s)
+    local wait_duration=$((wait_end - wait_start))
+    
+    echo ""
+    echo "✓ Stack creation complete! (took ${wait_duration}s)"
     echo ""
     
     # ============================================================

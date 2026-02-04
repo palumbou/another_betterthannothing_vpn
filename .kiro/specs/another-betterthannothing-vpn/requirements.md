@@ -139,8 +139,25 @@ This document specifies the requirements for "another_betterthannothing_vpn", a 
 13. THE Orchestration_Script SHALL accept `--spot` flag to use EC2 Spot instances instead of on-demand instances
 14. WHEN `--spot` flag is used, THEN THE CloudFormation_Template SHALL configure the instance with spot market options
 15. WHEN `--spot` flag is NOT used, THEN THE CloudFormation_Template SHALL use on-demand instances (default behavior)
+16. THE Orchestration_Script SHALL accept `--eip` flag to allocate an Elastic IP for the VPN instance
+17. WHEN `--eip` flag is NOT used, THEN THE Orchestration_Script SHALL display a warning that the public IP may change after instance stop/start operations
 
-### Requirement 10: VPN Server Bootstrap
+### Requirement 10: Elastic IP Management
+
+**User Story:** As a user, I want to optionally allocate an Elastic IP for my VPN instance, so that the public IP address remains stable across instance stop/start operations.
+
+#### Acceptance Criteria
+
+1. THE CloudFormation_Template SHALL accept an `AllocateEIP` parameter (boolean, default: false)
+2. WHEN `AllocateEIP` is true, THEN THE CloudFormation_Template SHALL create an AWS::EC2::EIP resource
+3. WHEN `AllocateEIP` is true, THEN THE CloudFormation_Template SHALL create an AWS::EC2::EIPAssociation to attach the EIP to the VPN instance
+4. WHEN `AllocateEIP` is false, THEN THE CloudFormation_Template SHALL NOT create EIP resources and the instance SHALL use a standard public IP
+5. THE CloudFormation_Template SHALL output the public IP address regardless of whether it is an EIP or standard public IP
+6. WHEN `--eip` flag is NOT used during stack creation, THEN THE Orchestration_Script SHALL display a warning: "WARNING: Without an Elastic IP, the public IP address will change if you stop and start the instance. Use --eip to allocate a persistent IP address."
+7. THE EIP resource SHALL have the costcenter tag applied
+8. WHEN the stack is deleted, THEN THE System SHALL automatically release the Elastic IP
+
+### Requirement 11: VPN Server Bootstrap
 
 **User Story:** As a system, I want to automatically configure the VPN server after instance launch, so that the VPN is ready to use without manual intervention.
 
@@ -153,7 +170,20 @@ This document specifies the requirements for "another_betterthannothing_vpn", a 
 5. THE Orchestration_Script SHALL start and enable the `wg-quick@wg0` service
 6. THE Orchestration_Script SHALL verify the VPN service is running after bootstrap
 
-### Requirement 11: NixOS Compatibility
+### Requirement 11: VPN Server Bootstrap
+
+**User Story:** As a system, I want to automatically configure the VPN server after instance launch, so that the VPN is ready to use without manual intervention.
+
+#### Acceptance Criteria
+
+1. WHEN the stack is created, THEN THE Orchestration_Script SHALL install wireguard-tools on the VPN_Server via SSM
+2. THE Orchestration_Script SHALL configure `/etc/wireguard/wg0.conf` on the VPN_Server
+3. THE Orchestration_Script SHALL enable IP forwarding on the VPN_Server
+4. WHEN Full_Tunnel mode is selected, THEN THE Orchestration_Script SHALL configure iptables/nftables for NAT
+5. THE Orchestration_Script SHALL start and enable the `wg-quick@wg0` service
+6. THE Orchestration_Script SHALL verify the VPN service is running after bootstrap
+
+### Requirement 12: NixOS Compatibility
 
 **User Story:** As a NixOS user, I want the script to automatically handle missing dependencies, so that I can use the tool without manual environment setup.
 
@@ -165,7 +195,19 @@ This document specifies the requirements for "another_betterthannothing_vpn", a 
 4. THE Orchestration_Script SHALL detect NixOS by checking for `/etc/NIXOS`
 5. THE Orchestration_Script SHALL re-execute itself within the temporary shell environment
 
-### Requirement 12: Idempotency and Error Handling
+### Requirement 12: NixOS Compatibility
+
+**User Story:** As a NixOS user, I want the script to automatically handle missing dependencies, so that I can use the tool without manual environment setup.
+
+#### Acceptance Criteria
+
+1. WHEN the script runs on NixOS and AWS CLI is not in PATH, THEN THE Orchestration_Script SHALL open a temporary shell with awscli2 available
+2. WHEN the script runs on NixOS and session-manager-plugin is not in PATH, THEN THE Orchestration_Script SHALL include it in the temporary shell
+3. WHEN the script runs on NixOS and jq is not in PATH, THEN THE Orchestration_Script SHALL include it in the temporary shell
+4. THE Orchestration_Script SHALL detect NixOS by checking for `/etc/NIXOS`
+5. THE Orchestration_Script SHALL re-execute itself within the temporary shell environment
+
+### Requirement 13: Idempotency and Error Handling
 
 **User Story:** As a user, I want the script to handle errors gracefully and avoid duplicate operations, so that I can safely retry failed operations.
 
@@ -177,7 +219,19 @@ This document specifies the requirements for "another_betterthannothing_vpn", a 
 4. WHEN adding a client to an existing stack, THEN THE Orchestration_Script SHALL NOT recreate existing clients
 5. THE Orchestration_Script SHALL validate required AWS CLI commands are available before execution
 
-### Requirement 13: Documentation and User Guidance
+### Requirement 13: Idempotency and Error Handling
+
+**User Story:** As a user, I want the script to handle errors gracefully and avoid duplicate operations, so that I can safely retry failed operations.
+
+#### Acceptance Criteria
+
+1. WHEN a stack already exists with the same name, THEN THE Orchestration_Script SHALL NOT attempt to recreate it
+2. WHEN a CloudFormation operation fails, THEN THE Orchestration_Script SHALL display a clear error message
+3. THE Orchestration_Script SHALL use `set -euo pipefail` for robust error handling
+4. WHEN adding a client to an existing stack, THEN THE Orchestration_Script SHALL NOT recreate existing clients
+5. THE Orchestration_Script SHALL validate required AWS CLI commands are available before execution
+
+### Requirement 14: Documentation and User Guidance
 
 **User Story:** As a user, I want comprehensive documentation, so that I can understand how to use the system and troubleshoot issues.
 
@@ -190,7 +244,20 @@ This document specifies the requirements for "another_betterthannothing_vpn", a 
 5. THE README SHALL include instructions for deleting all resources
 6. THE Orchestration_Script SHALL display a help message when invoked with `--help` or invalid arguments
 
-### Requirement 14: Output and Logging
+### Requirement 14: Documentation and User Guidance
+
+**User Story:** As a user, I want comprehensive documentation, so that I can understand how to use the system and troubleshoot issues.
+
+#### Acceptance Criteria
+
+1. THE System SHALL include a README.md in English with prerequisites, quickstart, CLI examples, security notes, cost warnings, and troubleshooting
+2. THE System SHALL include a README.it.md in Italian with the same content as README.md
+3. THE README SHALL explain the security threat model and limitations of the VPN approach
+4. THE README SHALL explain the "ephemeral compute box" use case for temporary workloads
+5. THE README SHALL include instructions for deleting all resources
+6. THE Orchestration_Script SHALL display a help message when invoked with `--help` or invalid arguments
+
+### Requirement 15: Output and Logging
 
 **User Story:** As a user, I want clear output and minimal logging, so that I can understand what the system is doing without exposing sensitive information.
 

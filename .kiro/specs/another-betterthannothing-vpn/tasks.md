@@ -45,25 +45,37 @@ Each task builds on previous work, with checkpoints to validate functionality be
   - Add costcenter tag to instance
   - _Requirements: 1.5, 3.4, 3.6, 9.13, 9.14, 9.15_
 
+- [x] 3.1 Add Elastic IP resources to CloudFormation template
+  - Add AllocateEIP parameter (String, default: "false")
+  - Create Condition "ShouldAllocateEIP" that evaluates AllocateEIP parameter
+  - Define AWS::EC2::EIP resource with Condition: ShouldAllocateEIP
+  - Set EIP Domain to "vpc"
+  - Add costcenter tag to EIP resource
+  - Define AWS::EC2::EIPAssociation resource with Condition: ShouldAllocateEIP
+  - Associate EIP with VpnInstance using AllocationId and InstanceId
+  - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.7_
+
 - [x] 4. Add CloudFormation outputs
   - Define output for InstanceId
-  - Define output for PublicIp (using GetAtt)
+  - Define output for PublicIp (conditional: use EIP if AllocateEIP=true, otherwise instance public IP)
   - Define output for VpcId
   - Define output for VpcCidr
   - Define output for AWS::Region
   - Define output for VpnPort parameter
   - Define output for VpnProtocol parameter
-  - _Requirements: 1.7_
+  - Define output for HasElasticIP (boolean indicating if EIP was allocated)
+  - _Requirements: 1.7, 10.5_
 
 - [x] 5. Create orchestration script structure and core utilities
   - Create `another_betterthannothing_vpn.sh` with shebang `#!/usr/bin/env bash` and `set -euo pipefail`
   - Define global variables (SCRIPT_DIR, TEMPLATE_FILE, DEFAULT_OUTPUT_DIR, DEFAULT_REGION)
   - Implement `display_help()` function with usage information and all command/option descriptions
-  - Implement `parse_args()` function to parse command and options (including --spot flag)
+  - Implement `parse_args()` function to parse command and options (including --spot and --eip flags)
   - Implement main() function with command routing (create, delete, start, stop, status, list, add-client, ssm)
   - Add help text explaining --allowed-cidr vs --vpc-cidr distinction
   - Add help text explaining --spot option for cost savings
-  - _Requirements: 5.7, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7, 9.13, 12.3, 13.6_
+  - Add help text explaining --eip option for persistent IP address
+  - _Requirements: 5.7, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7, 9.13, 9.16, 13.3, 14.6_
 
 - [x] 6. Implement dependency checking and NixOS support
   - Implement `check_dependencies()` function to verify aws, jq, session-manager-plugin in PATH
@@ -94,7 +106,7 @@ Each task builds on previous work, with checkpoints to validate functionality be
 
 - [x] 10. Implement create command - preparation phase
   - Implement `cmd_create()` function skeleton
-  - Parse and store all command-line options (region, name, mode, vpc-cidr, allowed-cidr, my-ip, instance-type, spot, clients, output-dir, yes)
+  - Parse and store all command-line options (region, name, mode, vpc-cidr, allowed-cidr, my-ip, instance-type, spot, eip, clients, output-dir, yes)
   - Validate mutually exclusive flags (--my-ip and --allowed-cidr)
   - Call validate_vpc_cidr() if --vpc-cidr provided
   - Call detect_my_ip() if --my-ip flag set
@@ -102,17 +114,19 @@ Each task builds on previous work, with checkpoints to validate functionality be
   - Check if stack already exists and fail with clear message if yes
   - Display security warning if AllowedIngressCidr is 0.0.0.0/0
   - Display cost savings note if --spot flag is used
-  - _Requirements: 3.5, 5.1, 5.5, 9.10, 9.13, 14.4_
+  - Display warning if --eip flag is NOT used: "WARNING: Without an Elastic IP, the public IP address will change if you stop and start the instance. Use --eip to allocate a persistent IP address."
+  - _Requirements: 3.5, 5.1, 5.5, 9.10, 9.13, 10.6, 15.4_
 
 - [x] 10. Implement create command - CloudFormation stack creation
-  - Prepare CloudFormation parameters array (VpcCidr, InstanceType, VpnPort, VpnProtocol, AllowedIngressCidr, UseSpotInstance)
+  - Prepare CloudFormation parameters array (VpcCidr, InstanceType, VpnPort, VpnProtocol, AllowedIngressCidr, UseSpotInstance, AllocateEIP)
+  - Set AllocateEIP parameter to "true" if --eip flag is set, "false" otherwise
   - Build aws cloudformation create-stack command with parameters and tags
   - Add stack-level tag: `--tags Key=costcenter,Value=<stack-name>`
   - Execute create-stack command
   - Display progress message "Creating stack '<name>' in region '<region>'..."
   - Execute `aws cloudformation wait stack-create-complete` with timeout
   - Handle stack creation failures by retrieving and displaying failed events
-  - _Requirements: 2.2, 5.1, 5.6, 9.14, 9.15, 12.2, 14.1_
+  - _Requirements: 2.2, 5.1, 5.6, 9.14, 9.15, 9.16, 13.2, 15.1_
 
 - [x] 11. Implement create command - SSM readiness and bootstrap
   - Retrieve stack outputs using get_stack_outputs()
@@ -272,7 +286,7 @@ Each task builds on previous work, with checkpoints to validate functionality be
   - Ensure technical terms are appropriately translated or kept in English where standard
   - _Requirements: 13.2_
 
-- [ ] 26. Add error handling and logging improvements
+- [x] 26. Add error handling and logging improvements
   - Review all functions for proper error handling
   - Ensure all AWS CLI commands check exit codes
   - Add error messages for common failure scenarios
@@ -281,7 +295,7 @@ Each task builds on previous work, with checkpoints to validate functionality be
   - Ensure all error messages include actionable next steps
   - _Requirements: 12.2, 12.3, 14.1, 14.3_
 
-- [ ] 27. Final integration and testing
+- [x] 27. Final integration and testing
   - Test create command with various parameter combinations
   - Test create with --my-ip flag
   - Test create with custom --vpc-cidr
@@ -298,7 +312,7 @@ Each task builds on previous work, with checkpoints to validate functionality be
   - Test error cases (invalid CIDR, stack already exists, missing credentials)
   - _Requirements: All_
 
-- [ ] 28. Final checkpoint - Complete system validation
+- [x] 28. Final checkpoint - Complete system validation
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
