@@ -6,6 +6,76 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_FILE="${SCRIPT_DIR}/template.yaml"
 DEFAULT_OUTPUT_DIR="${PWD}/another_betterthannothing_vpn_config"
 DEFAULT_REGION="us-east-1"
+EXECUTION_LOG_FILE="execution_log.json"
+
+# Save execution log to track stack information across script runs
+# Parameters: output_dir, stack_name, region, status, [additional_info]
+save_execution_log() {
+    local output_dir="$1"
+    local stack_name="$2"
+    local region="$3"
+    local status="$4"
+    local additional_info="${5:-}"
+    
+    # Create output directory if it doesn't exist
+    mkdir -p "$output_dir" 2>/dev/null || true
+    
+    local log_file="$output_dir/$EXECUTION_LOG_FILE"
+    local timestamp
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    
+    # Create or update the log entry for this stack
+    local log_entry
+    log_entry=$(jq -n \
+        --arg stack_name "$stack_name" \
+        --arg region "$region" \
+        --arg status "$status" \
+        --arg timestamp "$timestamp" \
+        --arg output_dir "$output_dir" \
+        --arg additional_info "$additional_info" \
+        '{
+            stack_name: $stack_name,
+            region: $region,
+            status: $status,
+            last_updated: $timestamp,
+            output_dir: $output_dir,
+            additional_info: $additional_info
+        }')
+    
+    # Read existing log file or create empty array
+    local existing_log="[]"
+    if [ -f "$log_file" ]; then
+        existing_log=$(cat "$log_file" 2>/dev/null || echo "[]")
+    fi
+    
+    # Update or add entry for this stack
+    local updated_log
+    updated_log=$(echo "$existing_log" | jq --argjson new_entry "$log_entry" '
+        if any(.[]; .stack_name == $new_entry.stack_name) then
+            map(if .stack_name == $new_entry.stack_name then $new_entry else . end)
+        else
+            . + [$new_entry]
+        end
+    ')
+    
+    # Write updated log
+    echo "$updated_log" > "$log_file" 2>/dev/null || true
+}
+
+# Get execution log entry for a stack
+# Parameters: output_dir, stack_name
+get_execution_log() {
+    local output_dir="$1"
+    local stack_name="$2"
+    
+    local log_file="$output_dir/$EXECUTION_LOG_FILE"
+    
+    if [ -f "$log_file" ]; then
+        jq -r --arg stack_name "$stack_name" '.[] | select(.stack_name == $stack_name)' "$log_file" 2>/dev/null || echo "{}"
+    else
+        echo "{}"
+    fi
+}
 
 # Check for required dependencies
 check_dependencies() {
@@ -303,7 +373,7 @@ detect_my_ip() {
     fi
 }
 
-# Generate unique stack name in format: another-YYYYMMDD-xxxx
+# Generate unique stack name in format: abthn-vpn-YYYYMMDD-xxxx
 generate_stack_name() {
     # Get current date in YYYYMMDD format
     local date_part
@@ -313,8 +383,8 @@ generate_stack_name() {
     local random_suffix
     random_suffix=$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom | head -c 4)
     
-    # Combine to create stack name
-    echo "another-${date_part}-${random_suffix}"
+    # Combine to create stack name (abthn-vpn = another-betterthannothing-vpn abbreviated)
+    echo "abthn-vpn-${date_part}-${random_suffix}"
 }
 
 # Validate if a CloudFormation stack exists
@@ -1246,7 +1316,7 @@ cmd_create() {
         --stack-name "$STACK_NAME" \
         --template-body "file://${TEMPLATE_FILE}" \
         --parameters "${cf_parameters[@]}" \
-        --capabilities CAPABILITY_IAM \
+        --capabilities CAPABILITY_NAMED_IAM \
         --tags "Key=CostCenter,Value=$STACK_NAME" \
         --region "$REGION" \
         --output json 2>&1); then
@@ -1274,6 +1344,8 @@ cmd_create() {
     if [ -n "$stack_id" ]; then
         echo "✓ Stack creation initiated"
         echo "  Stack ID: $stack_id"
+        # Save execution log with CREATING status
+        save_execution_log "$OUTPUT_DIR" "$STACK_NAME" "$REGION" "CREATING" "Stack ID: $stack_id"
     fi
     
     echo ""
@@ -1344,6 +1416,10 @@ cmd_create() {
         echo "" >&2
         echo "To clean up the failed stack, run:" >&2
         echo "  ./another_betterthannothing_vpn.sh delete --name $STACK_NAME --region $REGION --yes" >&2
+        
+        # Save execution log with FAILED status
+        save_execution_log "$OUTPUT_DIR" "$STACK_NAME" "$REGION" "CREATE_FAILED" "Stack creation failed"
+        
         exit 1
     fi
     
@@ -1357,6 +1433,9 @@ cmd_create() {
     echo ""
     echo "✓ Stack creation complete! (took ${wait_duration}s)"
     echo ""
+    
+    # Save execution log with CREATE_COMPLETE status
+    save_execution_log "$OUTPUT_DIR" "$STACK_NAME" "$REGION" "CREATE_COMPLETE" "Stack created successfully"
     
     # ============================================================
     # SSM READINESS AND BOOTSTRAP PHASE
@@ -1536,6 +1615,9 @@ cmd_create() {
     echo "  4. To delete the VPN when done:"
     echo "     ./another_betterthannothing_vpn.sh delete --name $STACK_NAME"
     echo ""
+    
+    # Update execution log with READY status
+    save_execution_log "$OUTPUT_DIR" "$STACK_NAME" "$REGION" "READY" "VPN setup complete, $client_count client(s) configured"
 }
 
 # Command: delete
@@ -1625,12 +1707,27 @@ cmd_delete() {
     echo ""
     echo "Stack '$STACK_NAME' has been deleted from region '$REGION'."
     echo ""
-    echo "Note: Local client configuration files remain at:"
-    echo "  $OUTPUT_DIR/$STACK_NAME/"
-    echo ""
-    echo "To remove local files, run:"
-    echo "  rm -rf $OUTPUT_DIR/$STACK_NAME/"
-    echo ""
+    
+    # Try to get the output directory from execution log
+    local log_entry
+    log_entry=$(get_execution_log "$OUTPUT_DIR" "$STACK_NAME")
+    local logged_output_dir
+    logged_output_dir=$(echo "$log_entry" | jq -r '.output_dir // empty' 2>/dev/null)
+    
+    # Use logged output dir if available, otherwise use current OUTPUT_DIR
+    local config_dir="${logged_output_dir:-$OUTPUT_DIR}"
+    
+    if [ -d "$config_dir/$STACK_NAME" ]; then
+        echo "Note: Local client configuration files remain at:"
+        echo "  $config_dir/$STACK_NAME/"
+        echo ""
+        echo "To remove local files, run:"
+        echo "  rm -rf $config_dir/$STACK_NAME/"
+        echo ""
+    fi
+    
+    # Update execution log with DELETED status
+    save_execution_log "$OUTPUT_DIR" "$STACK_NAME" "$REGION" "DELETED" "Stack deleted"
 }
 
 # Command: start
@@ -2146,12 +2243,12 @@ cmd_list() {
         exit 1
     fi
     
-    # Filter stacks with names matching pattern 'another-*'
+    # Filter stacks with names matching pattern 'abthn-vpn-*'
     # Filter out deleted stacks (status DELETE_COMPLETE)
     local filtered_stacks
     filtered_stacks=$(echo "$stacks_info" | jq -r '
         .StackSummaries[] | 
-        select(.StackName | startswith("another-")) | 
+        select(.StackName | startswith("abthn-vpn-")) | 
         select(.StackStatus != "DELETE_COMPLETE") |
         {
             StackName: .StackName,
@@ -2485,7 +2582,7 @@ cmd_ssm() {
             --region "$REGION" \
             --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
             --output json 2>/dev/null | \
-            jq -r '.StackSummaries[] | select(.StackName | startswith("another-")) | "  - " + .StackName' || true
+            jq -r '.StackSummaries[] | select(.StackName | startswith("abthn-vpn-")) | "  - " + .StackName' || true
         echo "" >&2
         exit 1
     fi

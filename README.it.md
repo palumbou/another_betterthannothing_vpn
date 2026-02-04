@@ -218,12 +218,12 @@ La modalità split-tunnel instrada solo il traffico VPC attraverso la VPN, lasci
 
 **Output:**
 ```
-Creating stack 'another-20260201-a3f9' in region 'us-east-1'...
+Creating stack 'abthn-vpn-20260201-a3f9' in region 'us-east-1'...
 Stack creation complete!
 Instance ready, bootstrapping VPN server...
 VPN server configured successfully!
 
-Client configuration saved to: ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-1.conf
+Client configuration saved to: ./another_betterthannothing_vpn_config/abthn-vpn-20260201-a3f9/clients/client-1.conf
 
 Connection Instructions:
   Endpoint: 54.123.45.67:51820
@@ -234,7 +234,7 @@ To connect:
   2. Activate the connection
 
 To add more clients:
-  ./another_betterthannothing_vpn.sh add-client --name another-20260201-a3f9
+  ./another_betterthannothing_vpn.sh add-client --name abthn-vpn-20260201-a3f9
 ```
 
 
@@ -255,7 +255,7 @@ La modalità full-tunnel instrada TUTTO il traffico attraverso la VPN:
 **Linux/macOS:**
 ```bash
 # Copia la configurazione nella directory WireGuard
-sudo cp ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-1.conf /etc/wireguard/
+sudo cp ./another_betterthannothing_vpn_config/abthn-vpn-20260201-a3f9/clients/client-1.conf /etc/wireguard/
 
 # Avvia la VPN
 sudo wg-quick up client-1
@@ -339,7 +339,7 @@ Elimina uno stack VPN e tutta l'infrastruttura associata.
 
 **Esempio:**
 ```bash
-./another_betterthannothing_vpn.sh delete --name another-20260201-a3f9 --yes
+./another_betterthannothing_vpn.sh delete --name abthn-vpn-20260201-a3f9 --yes
 ```
 
 **Nota:** Questo elimina tutte le risorse AWS ma NON elimina i file di configurazione client locali.
@@ -358,12 +358,12 @@ Visualizza le informazioni di stato per uno stack VPN.
 
 **Esempio:**
 ```bash
-./another_betterthannothing_vpn.sh status --name another-20260201-a3f9
+./another_betterthannothing_vpn.sh status --name abthn-vpn-20260201-a3f9
 ```
 
 **Output:**
 ```
-Stack: another-20260201-a3f9
+Stack: abthn-vpn-20260201-a3f9
 Status: CREATE_COMPLETE
 Region: us-east-1
 Instance ID: i-0123456789abcdef0
@@ -393,8 +393,8 @@ Elenca tutti gli stack VPN in una regione.
 **Output:**
 ```
 Stack Name                  Status              Region      VPN Endpoint
-another-20260201-a3f9      CREATE_COMPLETE     us-east-1   54.123.45.67:51820
-another-20260201-b7k2      CREATE_COMPLETE     us-east-1   54.234.56.78:51820
+abthn-vpn-20260201-a3f9      CREATE_COMPLETE     us-east-1   54.123.45.67:51820
+abthn-vpn-20260201-b7k2      CREATE_COMPLETE     us-east-1   54.234.56.78:51820
 ```
 
 #### `add-client`
@@ -410,13 +410,13 @@ Genera una nuova configurazione client per uno stack VPN esistente.
 
 **Esempio:**
 ```bash
-./another_betterthannothing_vpn.sh add-client --name another-20260201-a3f9
+./another_betterthannothing_vpn.sh add-client --name abthn-vpn-20260201-a3f9
 ```
 
 **Output:**
 ```
 Generating new client configuration...
-Client configuration saved to: ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-2.conf
+Client configuration saved to: ./another_betterthannothing_vpn_config/abthn-vpn-20260201-a3f9/clients/client-2.conf
 
 Connection Instructions:
   Endpoint: 54.123.45.67:51820
@@ -436,7 +436,7 @@ Apri una sessione SSM interattiva al server VPN per risoluzione dei problemi o o
 
 **Esempio:**
 ```bash
-./another_betterthannothing_vpn.sh ssm --name another-20260201-a3f9
+./another_betterthannothing_vpn.sh ssm --name abthn-vpn-20260201-a3f9
 ```
 
 **All'interno della sessione:**
@@ -705,7 +705,7 @@ Per casi d'uso temporanei, distruggi e ricrea periodicamente la VPN:
 
 ```bash
 # Elimina il vecchio stack
-./another_betterthannothing_vpn.sh delete --name another-20260201-a3f9 --yes
+./another_betterthannothing_vpn.sh delete --name abthn-vpn-20260201-a3f9 --yes
 
 # Crea un nuovo stack con chiavi fresche
 ./another_betterthannothing_vpn.sh create --my-ip
@@ -729,7 +729,7 @@ ls -la ./another_betterthannothing_vpn_config/*/clients/*.conf
 chmod 600 ./another_betterthannothing_vpn_config/*/clients/*.conf
 
 # Elimina le configurazioni quando non sono più necessarie
-rm -rf ./another_betterthannothing_vpn_config/another-20260201-a3f9/
+rm -rf ./another_betterthannothing_vpn_config/abthn-vpn-20260201-a3f9/
 ```
 
 ### 5. Usa la Modalità Split-Tunnel Quando Possibile
@@ -752,7 +752,7 @@ La modalità split-tunnel (`--mode split`) instrada solo il traffico VPC attrave
 Tutte le risorse sono taggate con `CostCenter=<nome-stack>`. Usa AWS Cost Explorer per tracciare la spesa:
 
 1. Vai a AWS Cost Explorer
-2. Filtra per tag: `CostCenter = another-20260201-a3f9`
+2. Filtra per tag: `CostCenter = abthn-vpn-20260201-a3f9`
 3. Visualizza i costi per servizio (EC2, trasferimento dati, ecc.)
 
 ### 7. Abilita VPC Flow Logs (Opzionale)
@@ -896,7 +896,7 @@ aws ce get-cost-and-usage \
 {
   "Tags": {
     "Key": "CostCenter",
-    "Values": ["another-20260201-a3f9"]
+    "Values": ["abthn-vpn-20260201-a3f9"]
   }
 }
 ```
@@ -920,7 +920,7 @@ aws budgets create-budget \
   "TimeUnit": "MONTHLY",
   "BudgetType": "COST",
   "CostFilters": {
-    "TagKeyValue": ["user:CostCenter$another-*"]
+    "TagKeyValue": ["user:CostCenter$abthn-vpn-*"]
   }
 }
 ```
@@ -946,7 +946,7 @@ psql -h 10.10.1.123 -U admin -d mydb
 sudo wg-quick down client-1
 
 # Elimina lo stack
-./another_betterthannothing_vpn.sh delete --name another-20260201-a3f9 --yes
+./another_betterthannothing_vpn.sh delete --name abthn-vpn-20260201-a3f9 --yes
 ```
 
 **Costo:** ~$0.05 per 1 ora di utilizzo.
@@ -960,7 +960,7 @@ Hai bisogno di un ambiente Linux pulito per compilare un progetto:
 ./another_betterthannothing_vpn.sh create --my-ip --spot
 
 # Apri sessione SSM
-./another_betterthannothing_vpn.sh ssm --name another-20260201-a3f9
+./another_betterthannothing_vpn.sh ssm --name abthn-vpn-20260201-a3f9
 
 # All'interno dell'istanza
 sudo dnf install -y gcc make git docker
@@ -973,7 +973,7 @@ aws s3 cp ./build/output s3://my-bucket/artifacts/
 
 # Esci ed elimina
 exit
-./another_betterthannothing_vpn.sh delete --name another-20260201-a3f9 --yes
+./another_betterthannothing_vpn.sh delete --name abthn-vpn-20260201-a3f9 --yes
 ```
 
 ### Esempio 3: Accesso VPN Multi-Dispositivo
@@ -985,15 +985,15 @@ Hai bisogno di accesso VPN da laptop, telefono e tablet:
 ./another_betterthannothing_vpn.sh create --my-ip --clients 3
 
 # Le configurazioni sono generate:
-# ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-1.conf (laptop)
-# ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-2.conf (telefono)
-# ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-3.conf (tablet)
+# ./another_betterthannothing_vpn_config/abthn-vpn-20260201-a3f9/clients/client-1.conf (laptop)
+# ./another_betterthannothing_vpn_config/abthn-vpn-20260201-a3f9/clients/client-2.conf (telefono)
+# ./another_betterthannothing_vpn_config/abthn-vpn-20260201-a3f9/clients/client-3.conf (tablet)
 
 # Trasferisci le configurazioni ai dispositivi (AirDrop, email, ecc.)
 # Importa ogni configurazione nell'app WireGuard del rispettivo dispositivo
 
 # Successivamente, aggiungi un 4° dispositivo
-./another_betterthannothing_vpn.sh add-client --name another-20260201-a3f9
+./another_betterthannothing_vpn.sh add-client --name abthn-vpn-20260201-a3f9
 ```
 
 ### Esempio 4: VPN Full-Tunnel per WiFi Pubblico
@@ -1072,7 +1072,7 @@ Usa il server VPN come host Docker temporaneo:
 ./another_betterthannothing_vpn.sh create --my-ip
 
 # Apri sessione SSM
-./another_betterthannothing_vpn.sh ssm --name another-20260201-a3f9
+./another_betterthannothing_vpn.sh ssm --name abthn-vpn-20260201-a3f9
 
 # Installa Docker
 sudo dnf install -y docker
@@ -1091,7 +1091,7 @@ psql -h 10.10.1.x -U postgres
 
 # Quando hai finito, elimina tutto
 exit
-./another_betterthannothing_vpn.sh delete --name another-20260201-a3f9 --yes
+./another_betterthannothing_vpn.sh delete --name abthn-vpn-20260201-a3f9 --yes
 ```
 
 
@@ -1471,7 +1471,7 @@ done
 for region in us-east-1 us-west-2 eu-west-1; do
   for stack in $(aws cloudformation list-stacks \
     --region $region \
-    --query 'StackSummaries[?starts_with(StackName, `another-`) && StackStatus!=`DELETE_COMPLETE`].StackName' \
+    --query 'StackSummaries[?starts_with(StackName, `abthn-vpn-`) && StackStatus!=`DELETE_COMPLETE`].StackName' \
     --output text); do
     echo "Deleting $stack in $region"
     ./another_betterthannothing_vpn.sh delete --name $stack --region $region --yes
