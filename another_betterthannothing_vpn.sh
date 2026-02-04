@@ -1587,7 +1587,6 @@ cmd_create() {
             exit 1
         fi
     fi
-    fi
     
     echo "Instance ID: $instance_id"
     echo ""
