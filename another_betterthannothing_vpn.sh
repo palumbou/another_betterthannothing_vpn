@@ -1739,19 +1739,26 @@ cmd_create() {
         echo "  $OUTPUT_DIR/$STACK_NAME/clients/$client_name.conf"
     done
     echo ""
+    
+    # Build region flag for commands (only if not default region)
+    local region_flag=""
+    if [ "$REGION" != "$DEFAULT_REGION" ]; then
+        region_flag=" --region $REGION"
+    fi
+    
     echo "Next Steps:"
     echo "  1. Import a client config file to your WireGuard client:"
     echo "     - Mobile: Scan QR code or import file"
     echo "     - Desktop: Import .conf file"
     echo ""
     echo "  2. To add more clients later:"
-    echo "     ./another_betterthannothing_vpn.sh add-client --name $STACK_NAME"
+    echo "     ./another_betterthannothing_vpn.sh add-client --name $STACK_NAME$region_flag"
     echo ""
     echo "  3. To connect via SSM for troubleshooting:"
-    echo "     ./another_betterthannothing_vpn.sh ssm --name $STACK_NAME"
+    echo "     ./another_betterthannothing_vpn.sh ssm --name $STACK_NAME$region_flag"
     echo ""
     echo "  4. To delete the VPN when done:"
-    echo "     ./another_betterthannothing_vpn.sh delete --name $STACK_NAME"
+    echo "     ./another_betterthannothing_vpn.sh delete --name $STACK_NAME$region_flag"
     echo ""
     
     # Update execution log with READY status
@@ -2686,6 +2693,13 @@ cmd_add_client() {
         echo "  Routing:     Only VPC traffic through VPN ($vpc_cidr)"
     fi
     echo ""
+    
+    # Build region flag for commands (only if not default region)
+    local region_flag=""
+    if [ "$REGION" != "$DEFAULT_REGION" ]; then
+        region_flag=" --region $REGION"
+    fi
+    
     echo "Next Steps:"
     echo "  1. Import the client config file to your WireGuard client:"
     echo "     $OUTPUT_DIR/$STACK_NAME/clients/$next_client_name.conf"
@@ -2694,7 +2708,7 @@ cmd_add_client() {
     echo "     qrencode -t ansiutf8 < $OUTPUT_DIR/$STACK_NAME/clients/$next_client_name.conf"
     echo ""
     echo "  3. To add another client:"
-    echo "     ./another_betterthannothing_vpn.sh add-client --name $STACK_NAME"
+    echo "     ./another_betterthannothing_vpn.sh add-client --name $STACK_NAME$region_flag"
     echo ""
 }
 
