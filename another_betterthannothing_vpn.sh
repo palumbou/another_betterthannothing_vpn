@@ -709,6 +709,7 @@ execute_remote_command() {
 
 # Bootstrap VPN server with WireGuard configuration
 # Installs WireGuard, generates keys, configures service
+# Note: All status messages go to stderr, only the server public key goes to stdout
 bootstrap_vpn_server() {
     local instance_id="$1"
     local region="$2"
@@ -716,14 +717,14 @@ bootstrap_vpn_server() {
     local vpn_port="$4"
     local vpc_cidr="$5"
     
-    echo ""
-    echo "=== Bootstrapping VPN Server ==="
-    echo ""
+    echo "" >&2
+    echo "=== Bootstrapping VPN Server ===" >&2
+    echo "" >&2
     
     # Step 1: Install wireguard-tools
-    echo "[1/7] Installing WireGuard tools..."
+    echo "[1/7] Installing WireGuard tools..." >&2
     if ! execute_remote_command "$instance_id" "$region" \
-        "sudo dnf install -y wireguard-tools" 300; then
+        "sudo dnf install -y wireguard-tools" 300 >&2; then
         echo "" >&2
         echo "Error: Failed to install wireguard-tools" >&2
         echo "" >&2
@@ -737,11 +738,11 @@ bootstrap_vpn_server() {
         echo "  - Check system logs: sudo journalctl -xe" >&2
         return 1
     fi
-    echo "      ✓ WireGuard tools installed"
-    echo ""
+    echo "      ✓ WireGuard tools installed" >&2
+    echo "" >&2
     
     # Step 2: Generate server WireGuard keys
-    echo "[2/7] Generating server WireGuard keys..."
+    echo "[2/7] Generating server WireGuard keys..." >&2
     local server_private_key
     if ! server_private_key=$(execute_remote_command "$instance_id" "$region" \
         "wg genkey | sudo tee /etc/wireguard/server_private.key" 60); then
@@ -782,23 +783,23 @@ bootstrap_vpn_server() {
         return 1
     fi
     
-    echo "      ✓ Server keys generated"
-    echo "      Public key: $server_public_key"
-    echo ""
+    echo "      ✓ Server keys generated" >&2
+    echo "      Public key: $server_public_key" >&2
+    echo "" >&2
     
     # Step 3: Set proper permissions on key files
-    echo "[3/7] Setting key file permissions..."
+    echo "[3/7] Setting key file permissions..." >&2
     if ! execute_remote_command "$instance_id" "$region" \
-        "sudo chmod 600 /etc/wireguard/server_private.key /etc/wireguard/server_public.key" 60; then
+        "sudo chmod 600 /etc/wireguard/server_private.key /etc/wireguard/server_public.key" 60 >&2; then
         echo "" >&2
         echo "Error: Failed to set key file permissions" >&2
         return 1
     fi
-    echo "      ✓ Key file permissions set (600)"
-    echo ""
+    echo "      ✓ Key file permissions set (600)" >&2
+    echo "" >&2
     
     # Step 4: Create WireGuard configuration file
-    echo "[4/7] Creating WireGuard configuration..."
+    echo "[4/7] Creating WireGuard configuration..." >&2
     
     # Build the configuration file content
     local wg_config="[Interface]
@@ -811,9 +812,9 @@ PrivateKey = $server_private_key"
         wg_config="$wg_config
 PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE"
-        echo "      Mode: Full-tunnel (NAT enabled)"
+        echo "      Mode: Full-tunnel (NAT enabled)" >&2
     else
-        echo "      Mode: Split-tunnel (no NAT)"
+        echo "      Mode: Split-tunnel (no NAT)" >&2
     fi
     
     # Write configuration file
@@ -824,7 +825,7 @@ $wg_config
 # Peers will be added dynamically
 WGEOF"
     
-    if ! execute_remote_command "$instance_id" "$region" "$create_config_cmd" 60; then
+    if ! execute_remote_command "$instance_id" "$region" "$create_config_cmd" 60 >&2; then
         echo "" >&2
         echo "Error: Failed to create WireGuard configuration file" >&2
         return 1
@@ -832,21 +833,21 @@ WGEOF"
     
     # Set proper permissions on config file
     if ! execute_remote_command "$instance_id" "$region" \
-        "sudo chmod 600 /etc/wireguard/wg0.conf" 60; then
+        "sudo chmod 600 /etc/wireguard/wg0.conf" 60 >&2; then
         echo "" >&2
         echo "Error: Failed to set config file permissions" >&2
         return 1
     fi
     
-    echo "      ✓ WireGuard configuration created"
-    echo ""
+    echo "      ✓ WireGuard configuration created" >&2
+    echo "" >&2
     
     # Step 5: Enable IP forwarding
-    echo "[5/7] Enabling IP forwarding..."
+    echo "[5/7] Enabling IP forwarding..." >&2
     
     # Enable IP forwarding immediately
     if ! execute_remote_command "$instance_id" "$region" \
-        "sudo sysctl -w net.ipv4.ip_forward=1" 60; then
+        "sudo sysctl -w net.ipv4.ip_forward=1" 60 >&2; then
         echo "" >&2
         echo "Error: Failed to enable IP forwarding" >&2
         return 1
@@ -854,20 +855,20 @@ WGEOF"
     
     # Persist IP forwarding setting
     if ! execute_remote_command "$instance_id" "$region" \
-        "echo 'net.ipv4.ip_forward = 1' | sudo tee /etc/sysctl.d/99-wireguard.conf > /dev/null" 60; then
+        "echo 'net.ipv4.ip_forward = 1' | sudo tee /etc/sysctl.d/99-wireguard.conf > /dev/null" 60 >&2; then
         echo "" >&2
         echo "Error: Failed to persist IP forwarding setting" >&2
         return 1
     fi
     
-    echo "      ✓ IP forwarding enabled and persisted"
-    echo ""
+    echo "      ✓ IP forwarding enabled and persisted" >&2
+    echo "" >&2
     
     # Step 6: Start and enable WireGuard service
-    echo "[6/7] Starting WireGuard service..."
+    echo "[6/7] Starting WireGuard service..." >&2
     
     if ! execute_remote_command "$instance_id" "$region" \
-        "sudo systemctl enable --now wg-quick@wg0" 120; then
+        "sudo systemctl enable --now wg-quick@wg0" 120 >&2; then
         echo "" >&2
         echo "Error: Failed to start WireGuard service" >&2
         echo "" >&2
@@ -878,11 +879,11 @@ WGEOF"
         return 1
     fi
     
-    echo "      ✓ WireGuard service started and enabled"
-    echo ""
+    echo "      ✓ WireGuard service started and enabled" >&2
+    echo "" >&2
     
     # Step 7: Verify service is running
-    echo "[7/7] Verifying WireGuard service status..."
+    echo "[7/7] Verifying WireGuard service status..." >&2
     
     local service_status
     if ! service_status=$(execute_remote_command "$instance_id" "$region" \
@@ -904,11 +905,11 @@ WGEOF"
         return 1
     fi
     
-    echo "      ✓ WireGuard service is active and running"
-    echo ""
+    echo "      ✓ WireGuard service is active and running" >&2
+    echo "" >&2
     
-    echo "=== VPN Server Bootstrap Complete ==="
-    echo ""
+    echo "=== VPN Server Bootstrap Complete ===" >&2
+    echo "" >&2
     
     # Store server public key for later use (return it)
     # Note: Private key is never returned or logged
