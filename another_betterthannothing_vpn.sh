@@ -4,7 +4,7 @@ set -euo pipefail
 # Global variables
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_FILE="${SCRIPT_DIR}/template.yaml"
-DEFAULT_OUTPUT_DIR="${HOME}/.another-vpn"
+DEFAULT_OUTPUT_DIR="${PWD}/another_betterthannothing_vpn_config"
 DEFAULT_REGION="us-east-1"
 
 # Check for required dependencies
@@ -923,8 +923,10 @@ OPTIONS:
     --instance-type <type>      EC2 instance type (default: t4g.nano)
     --spot                      Use EC2 Spot instances for cost savings
                                 (lower cost but can be interrupted)
+    --eip                       Allocate an Elastic IP for persistent public IP
+                                (recommended to avoid IP changes on stop/start)
     --clients <n>               Number of initial clients (default: 1)
-    --output-dir <path>         Output directory (default: ~/.another-vpn)
+    --output-dir <path>         Output directory (default: ./another_betterthannothing_vpn_config)
     --yes, --non-interactive    Skip confirmations
     --help                      Show this help message
 
@@ -977,6 +979,9 @@ EXAMPLES:
     # Create VPN using Spot instances for cost savings
     ./another_betterthannothing_vpn.sh create --spot --my-ip
 
+    # Create VPN with Elastic IP (persistent IP address)
+    ./another_betterthannothing_vpn.sh create --my-ip --eip
+
     # Stop VPN instance to save costs (keeps infrastructure)
     ./another_betterthannothing_vpn.sh stop --name my-vpn
 
@@ -1015,6 +1020,7 @@ parse_args() {
     VPC_CIDR="10.10.0.0/16"
     INSTANCE_TYPE="t4g.nano"
     USE_SPOT=false
+    ALLOCATE_EIP=false
     NUM_CLIENTS=1
     OUTPUT_DIR="${DEFAULT_OUTPUT_DIR}"
     NON_INTERACTIVE=false
@@ -1064,6 +1070,10 @@ parse_args() {
                 USE_SPOT=true
                 shift
                 ;;
+            --eip)
+                ALLOCATE_EIP=true
+                shift
+                ;;
             --clients)
                 NUM_CLIENTS="$2"
                 shift 2
@@ -1089,7 +1099,7 @@ parse_args() {
     done
 
     # Export variables for use in command functions
-    export COMMAND REGION STACK_NAME MODE USE_MY_IP VPC_CIDR INSTANCE_TYPE USE_SPOT NUM_CLIENTS OUTPUT_DIR NON_INTERACTIVE
+    export COMMAND REGION STACK_NAME MODE USE_MY_IP VPC_CIDR INSTANCE_TYPE USE_SPOT ALLOCATE_EIP NUM_CLIENTS OUTPUT_DIR NON_INTERACTIVE
     export ALLOWED_CIDRS
 }
 
@@ -1198,10 +1208,18 @@ cmd_create() {
     echo "Allowed Ingress:   $allowed_ingress_cidr"
     echo "Instance Type:     $INSTANCE_TYPE"
     echo "Spot Instance:     $USE_SPOT"
+    echo "Elastic IP:        $ALLOCATE_EIP"
     echo "Initial Clients:   $NUM_CLIENTS"
     echo "Output Directory:  $OUTPUT_DIR"
     echo "================================="
     echo ""
+    
+    # Display warning if --eip flag is NOT used
+    if [ "$ALLOCATE_EIP" = false ]; then
+        echo "⚠️  NOTE: Without an Elastic IP, the public IP address will change if you" >&2
+        echo "   stop and start the instance. Use --eip to allocate a persistent IP address." >&2
+        echo "" >&2
+    fi
     
     # ============================================================
     # CLOUDFORMATION STACK CREATION PHASE
@@ -1215,6 +1233,7 @@ cmd_create() {
         "ParameterKey=VpnProtocol,ParameterValue=udp"
         "ParameterKey=AllowedIngressCidr,ParameterValue=$allowed_ingress_cidr"
         "ParameterKey=UseSpotInstance,ParameterValue=$USE_SPOT"
+        "ParameterKey=AllocateEIP,ParameterValue=$ALLOCATE_EIP"
     )
     
     # Build CloudFormation create-stack command
@@ -1228,7 +1247,7 @@ cmd_create() {
         --template-body "file://${TEMPLATE_FILE}" \
         --parameters "${cf_parameters[@]}" \
         --capabilities CAPABILITY_IAM \
-        --tags "Key=costcenter,Value=$STACK_NAME" \
+        --tags "Key=CostCenter,Value=$STACK_NAME" \
         --region "$REGION" \
         --output json 2>&1); then
         echo "" >&2
@@ -1965,8 +1984,12 @@ cmd_status() {
     local vpn_protocol
     vpn_protocol=$(echo "$stack_outputs" | jq -r '.VpnProtocol // "N/A"')
     
+    local has_elastic_ip
+    has_elastic_ip=$(echo "$stack_outputs" | jq -r '.HasElasticIP // "N/A"')
+    
     echo "Instance ID:     $instance_id"
     echo "Public IP:       $public_ip"
+    echo "Elastic IP:      $has_elastic_ip"
     echo "VPC ID:          $vpc_id"
     echo "VPC CIDR:        $vpc_cidr"
     echo "VPN Port:        $vpn_port"

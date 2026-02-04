@@ -1,14 +1,16 @@
-# another_betterthannothing_vpn
+# Another Betterthannothing VPN
 
 Un'infrastruttura VPN usa e getta su AWS con superficie di attacco minima e automazione completa del ciclo di vita.
 
+> **Lingue disponibili**: [English](README.md) | [Italiano (corrente)](README.it.md)
+
 ## Panoramica
 
-`another_betterthannothing_vpn` crea un VPC AWS dedicato con un'istanza EC2 che esegue WireGuard VPN, gestibile interamente tramite CloudFormation e un singolo script Bash. L'infrastruttura supporta sia la modalità full-tunnel (tutto il traffico attraverso la VPN) che split-tunnel (solo il traffico VPC attraverso la VPN), con accesso sicuro tramite AWS Systems Manager (SSM) - nessuna esposizione SSH pubblica.
+`Another Betterthannothing VPN` crea un VPC AWS dedicato con un'istanza EC2 che esegue WireGuard VPN, gestibile interamente tramite CloudFormation e un singolo script Bash. L'infrastruttura supporta sia la modalità full-tunnel (tutto il traffico attraverso la VPN) che split-tunnel (solo il traffico VPC attraverso la VPN), con accesso sicuro tramite AWS Systems Manager (SSM) - nessuna esposizione SSH pubblica.
 
 **Caratteristiche principali:**
 - 🔒 **Sicuro per impostazione predefinita**: accesso solo SSM, nessuna esposizione SSH, IMDSv2 applicato
-- 💰 **Costi trasparenti**: tutte le risorse taggate con `costcenter` per un tracciamento accurato
+- 💰 **Costi trasparenti**: tutte le risorse taggate con `CostCenter` per un tracciamento accurato
 - ⚡ **Distribuzione con un solo comando**: crea, configura e genera configurazioni client in un solo passaggio
 - 🌍 **Supporto multi-regione**: distribuisci l'infrastruttura VPN in qualsiasi regione AWS
 - 🔄 **Effimero**: progettato per casi d'uso temporanei, facile da creare e distruggere
@@ -22,6 +24,7 @@ Un'infrastruttura VPN usa e getta su AWS con superficie di attacco minima e auto
 - [Avvio Rapido](#avvio-rapido)
 - [Riferimento CLI](#riferimento-cli)
 - [Comprendere i Parametri CIDR](#comprendere-i-parametri-cidr)
+- [Supporto Elastic IP (EIP)](#supporto-elastic-ip-eip)
 - [Best Practice di Sicurezza](#best-practice-di-sicurezza)
 - [Considerazioni sui Costi](#considerazioni-sui-costi)
 - [Esempi](#esempi)
@@ -43,7 +46,7 @@ Questa VPN è progettata per **scenari temporanei a basso rischio** in cui hai b
 
 **Quando NON usare questa VPN:**
 - ❌ Protezione di dati o comunicazioni aziendali sensibili
-- ❌ Elusione della censura in ambienti ostili (singolo punto di guasto)
+- ❌ Elusione della censura in ambienti ostili (single point of failure)
 - ❌ Carichi di lavoro di produzione a lungo termine che richiedono alta disponibilità
 - ❌ Scenari che richiedono anonimato (l'account AWS è legato alla tua identità)
 - ❌ Ambienti regolamentati per conformità (HIPAA, PCI-DSS, ecc.)
@@ -220,7 +223,7 @@ Stack creation complete!
 Instance ready, bootstrapping VPN server...
 VPN server configured successfully!
 
-Client configuration saved to: ~/.another-vpn/another-20260201-a3f9/clients/client-1.conf
+Client configuration saved to: ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-1.conf
 
 Connection Instructions:
   Endpoint: 54.123.45.67:51820
@@ -252,7 +255,7 @@ La modalità full-tunnel instrada TUTTO il traffico attraverso la VPN:
 **Linux/macOS:**
 ```bash
 # Copia la configurazione nella directory WireGuard
-sudo cp ~/.another-vpn/another-20260201-a3f9/clients/client-1.conf /etc/wireguard/
+sudo cp ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-1.conf /etc/wireguard/
 
 # Avvia la VPN
 sudo wg-quick up client-1
@@ -296,8 +299,9 @@ Crea un nuovo stack VPN con tutta l'infrastruttura e la configurazione.
 - `--vpc-cidr <cidr>` - Blocco CIDR VPC (predefinito: 10.10.0.0/16, deve essere un intervallo privato RFC 1918)
 - `--instance-type <tipo>` - Tipo di istanza EC2 (predefinito: t4g.nano)
 - `--spot` - Usa istanze EC2 Spot per costi inferiori (possono essere interrotte)
+- `--eip` - Alloca un Elastic IP per un indirizzo IP pubblico persistente
 - `--clients <n>` - Numero di configurazioni client iniziali da generare (predefinito: 1)
-- `--output-dir <percorso>` - Directory di output per le configurazioni client (predefinito: ~/.another-vpn)
+- `--output-dir <percorso>` - Directory di output per le configurazioni client (predefinito: ./another_betterthannothing_vpn_config)
 - `--yes` - Salta i prompt di conferma
 
 **Esempi:**
@@ -316,6 +320,9 @@ Crea un nuovo stack VPN con tutta l'infrastruttura e la configurazione.
 
 # CIDR VPC personalizzato per evitare conflitti
 ./another_betterthannothing_vpn.sh create --my-ip --vpc-cidr 172.16.0.0/16
+
+# Crea VPN con Elastic IP (indirizzo IP persistente)
+./another_betterthannothing_vpn.sh create --my-ip --eip
 ```
 
 #### `delete`
@@ -409,7 +416,7 @@ Genera una nuova configurazione client per uno stack VPN esistente.
 **Output:**
 ```
 Generating new client configuration...
-Client configuration saved to: ~/.another-vpn/another-20260201-a3f9/clients/client-2.conf
+Client configuration saved to: ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-2.conf
 
 Connection Instructions:
   Endpoint: 54.123.45.67:51820
@@ -539,28 +546,28 @@ Il sistema utilizza **due parametri CIDR distinti** con scopi diversi. Comprende
 │  VPC CIDR (--vpc-cidr)                                      │
 │  "Qual è l'intervallo di rete interno?"                     │
 │                                                             │
-│  ┌───────────────────────────────────────────────────────┐ │
-│  │  VPC: 10.10.0.0/16                                    │ │
-│  │  ┌─────────────────────────────────────────────────┐ │ │
-│  │  │  Subnet: 10.10.1.0/24                           │ │ │
-│  │  │  ┌───────────────────────────────────────────┐  │ │ │
-│  │  │  │  Istanza EC2: 10.10.1.42                  │  │ │ │
-│  │  │  └───────────────────────────────────────────┘  │ │ │
-│  │  └─────────────────────────────────────────────────┘ │ │
-│  └───────────────────────────────────────────────────────┘ │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  VPC: 10.10.0.0/16                                    │  │
+│  │  ┌─────────────────────────────────────────────────┐  │  │
+│  │  │  Subnet: 10.10.1.0/24                           │  │  │
+│  │  │  ┌───────────────────────────────────────────┐  │  │  │
+│  │  │  │  Istanza EC2: 10.10.1.42                  │  │  │  │
+│  │  │  └───────────────────────────────────────────┘  │  │  │
+│  │  └─────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│  CIDR Ingresso Consentito (--allowed-cidr / --my-ip)       │
+│  CIDR Ingresso Consentito (--allowed-cidr / --my-ip)        │
 │  "Chi può connettersi alla VPN?"                            │
 │                                                             │
 │  Internet                                                   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  Tuo IP: 203.0.113.42/32  ✅ CONSENTITO             │   │
-│  └─────────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  Altro IP: 198.51.100.99   ❌ BLOCCATO              │   │
-│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  Tuo IP: 203.0.113.42/32  ✅ CONSENTITO             │    │
+│  └─────────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  Altro IP: 198.51.100.99   ❌ BLOCCATO              │    │
+│  └─────────────────────────────────────────────────────┘    │
 │                                                             │
 │  Regola Security Group:                                     │
 │  Consenti UDP/51820 da 203.0.113.42/32                      │
@@ -590,6 +597,75 @@ Il sistema utilizza **due parametri CIDR distinti** con scopi diversi. Comprende
   --my-ip \                    # Controllo accessi: solo il mio IP
   --vpc-cidr 172.16.0.0/16     # Rete interna: intervallo personalizzato
 ```
+
+## Supporto Elastic IP (EIP)
+
+### Cos'è un Elastic IP?
+
+Un Elastic IP (EIP) è un indirizzo IPv4 pubblico statico che persiste anche quando fermi e avvii la tua istanza EC2. Senza un EIP, il tuo server VPN ottiene un nuovo indirizzo IP pubblico ogni volta che l'istanza viene fermata e riavviata, richiedendoti di rigenerare tutte le configurazioni client.
+
+### Quando Usare EIP
+
+**Usa EIP quando:**
+- ✅ Pianifichi di fermare/avviare l'istanza frequentemente per risparmiare sui costi
+- ✅ Hai bisogno di un endpoint VPN persistente che non cambia
+- ✅ Vuoi evitare di rigenerare le configurazioni client dopo i riavvii dell'istanza
+- ✅ Stai usando la VPN per progetti a lungo termine (settimane/mesi)
+
+**Salta EIP quando:**
+- ❌ Stai creando una VPN veramente effimera (crea → usa → elimina in una sessione)
+- ❌ Vuoi minimizzare i costi (EIP costa ~$3.60/mese quando l'istanza è fermata)
+- ❌ Non ti dispiace rigenerare le configurazioni client se l'IP cambia
+
+### Considerazioni sui Costi
+
+**Prezzi EIP (a partire dal 2026):**
+- **Mentre l'istanza è in esecuzione:** Gratuito (nessun costo aggiuntivo)
+- **Mentre l'istanza è fermata:** ~$0.005/ora = ~$3.60/mese
+- **Se non associato a un'istanza:** ~$0.005/ora = ~$3.60/mese
+
+**Scenari di costo di esempio:**
+
+| Scenario | Senza EIP | Con EIP |
+|----------|-----------|---------|
+| Sempre in esecuzione (730h/mese) | $3.02/mese | $3.02/mese (nessun costo extra) |
+| Esegui 8h/giorno, ferma 16h/giorno | $1.01/mese | $2.81/mese ($1.80 costo EIP) |
+| Esegui 1 giorno/settimana, fermato il resto | $0.43/mese | $3.17/mese ($2.74 costo EIP) |
+
+**Intuizione chiave:** EIP è conveniente se la tua istanza è in esecuzione la maggior parte del tempo. Se fermi l'istanza frequentemente, EIP aggiunge un costo significativo.
+
+### Come Usare EIP
+
+Per allocare un Elastic IP per il tuo server VPN, usa il flag `--eip` quando crei lo stack:
+
+```bash
+# Crea VPN con Elastic IP
+./another_betterthannothing_vpn.sh create --my-ip --eip
+
+# Con altre opzioni
+./another_betterthannothing_vpn.sh create --my-ip --eip --mode full --region eu-west-1
+```
+
+L'Elastic IP verrà automaticamente allocato e associato alla tua istanza VPN. L'indirizzo IP persisterà anche se fermi e avvii l'istanza.
+
+### Cosa Succede Senza EIP
+
+Quando fermi e avvii un'istanza EC2 senza un EIP:
+
+1. **L'istanza si ferma:** La VPN diventa non disponibile
+2. **L'istanza si avvia:** AWS assegna un nuovo IP pubblico casuale
+3. **Le configurazioni client si rompono:** Tutte le configurazioni client esistenti puntano al vecchio IP
+4. **Correzione manuale richiesta:** Devi:
+   - Ottenere il nuovo IP: `./another_betterthannothing_vpn.sh status --name <nome-stack>`
+   - Rigenerare tutte le configurazioni client: `./another_betterthannothing_vpn.sh add-client --name <nome-stack>`
+   - Ridistribuire le nuove configurazioni a tutti i dispositivi
+
+### Best Practice
+
+1. **Per VPN effimere (ore/giorni):** Salta EIP, elimina lo stack quando hai finito
+2. **Per VPN persistenti (settimane/mesi):** Usa EIP per evitare cambiamenti di IP
+3. **Per l'ottimizzazione dei costi:** Se usi EIP, mantieni l'istanza in esecuzione o elimina completamente lo stack (non lasciarla fermata)
+4. **Per i test:** Inizia senza EIP, aggiungilo in seguito se necessario (richiede ricreazione dello stack)
 
 
 ## Best Practice di Sicurezza
@@ -647,13 +723,13 @@ I file di configurazione client contengono chiavi private. Proteggili:
 
 ```bash
 # Verifica i permessi (dovrebbero essere 600)
-ls -la ~/.another-vpn/*/clients/*.conf
+ls -la ./another_betterthannothing_vpn_config/*/clients/*.conf
 
 # Se necessario, correggi i permessi
-chmod 600 ~/.another-vpn/*/clients/*.conf
+chmod 600 ./another_betterthannothing_vpn_config/*/clients/*.conf
 
 # Elimina le configurazioni quando non sono più necessarie
-rm -rf ~/.another-vpn/another-20260201-a3f9/
+rm -rf ./another_betterthannothing_vpn_config/another-20260201-a3f9/
 ```
 
 ### 5. Usa la Modalità Split-Tunnel Quando Possibile
@@ -673,10 +749,10 @@ La modalità split-tunnel (`--mode split`) instrada solo il traffico VPC attrave
 
 ### 6. Monitora i Costi con i Tag
 
-Tutte le risorse sono taggate con `costcenter=<nome-stack>`. Usa AWS Cost Explorer per tracciare la spesa:
+Tutte le risorse sono taggate con `CostCenter=<nome-stack>`. Usa AWS Cost Explorer per tracciare la spesa:
 
 1. Vai a AWS Cost Explorer
-2. Filtra per tag: `costcenter = another-20260201-a3f9`
+2. Filtra per tag: `CostCenter = another-20260201-a3f9`
 3. Visualizza i costi per servizio (EC2, trasferimento dati, ecc.)
 
 ### 7. Abilita VPC Flow Logs (Opzionale)
@@ -690,7 +766,7 @@ aws ec2 create-flow-logs \
   --resource-ids <vpc-id> \
   --traffic-type ALL \
   --log-destination-type cloud-watch-logs \
-  --log-group-name /aws/vpc/another-vpn
+  --log-group-name /aws/vpc/another-betterthannothing-vpn
 ```
 
 **Nota:** I Flow Logs comportano costi aggiuntivi (~$0.50 per GB ingerito).
@@ -721,7 +797,7 @@ Il Security Group NON consente SSH (porta 22). Tutto l'accesso avviene tramite S
 
 ### 10. Rivedi il Template CloudFormation
 
-Prima di distribuire, rivedi il `template.yaml` per capire quali risorse vengono create:
+Prima di rilasciare, rivedi il `template.yaml` per capire quali risorse vengono create:
 
 ```bash
 # Visualizza il template
@@ -799,12 +875,12 @@ Assumendo 10 GB/mese di traffico VPN:
 
 ### Tracciamento dei Costi con i Tag
 
-Tutte le risorse sono taggate con `costcenter=<nome-stack>`. Usa questo per tracciare i costi:
+Tutte le risorse sono taggate con `CostCenter=<nome-stack>`. Usa questo per tracciare i costi:
 
 **AWS Cost Explorer:**
 1. Naviga su AWS Cost Explorer
 2. Clicca su "Cost & Usage Reports"
-3. Aggiungi filtro: Tag → `costcenter` → `<tuo-nome-stack>`
+3. Aggiungi filtro: Tag → `CostCenter` → `<tuo-nome-stack>`
 4. Visualizza la suddivisione per servizio
 
 **AWS CLI:**
@@ -819,7 +895,7 @@ aws ce get-cost-and-usage \
 # filter.json:
 {
   "Tags": {
-    "Key": "costcenter",
+    "Key": "CostCenter",
     "Values": ["another-20260201-a3f9"]
   }
 }
@@ -844,7 +920,7 @@ aws budgets create-budget \
   "TimeUnit": "MONTHLY",
   "BudgetType": "COST",
   "CostFilters": {
-    "TagKeyValue": ["user:costcenter$another-*"]
+    "TagKeyValue": ["user:CostCenter$another-*"]
   }
 }
 ```
@@ -909,9 +985,9 @@ Hai bisogno di accesso VPN da laptop, telefono e tablet:
 ./another_betterthannothing_vpn.sh create --my-ip --clients 3
 
 # Le configurazioni sono generate:
-# ~/.another-vpn/another-20260201-a3f9/clients/client-1.conf (laptop)
-# ~/.another-vpn/another-20260201-a3f9/clients/client-2.conf (telefono)
-# ~/.another-vpn/another-20260201-a3f9/clients/client-3.conf (tablet)
+# ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-1.conf (laptop)
+# ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-2.conf (telefono)
+# ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-3.conf (tablet)
 
 # Trasferisci le configurazioni ai dispositivi (AirDrop, email, ecc.)
 # Importa ogni configurazione nell'app WireGuard del rispettivo dispositivo
@@ -1084,7 +1160,7 @@ Timeout: SSM agent did not become ready after 5 minutes
    ./another_betterthannothing_vpn.sh status --name <nome-stack>
    
    # Confronta con la configurazione client
-   grep Endpoint ~/.another-vpn/<nome-stack>/clients/client-1.conf
+   grep Endpoint ./another_betterthannothing_vpn_config/<nome-stack>/clients/client-1.conf
    ```
    
    Se gli IP non corrispondono (l'istanza è stata fermata/avviata), rigenera la configurazione client:
@@ -1095,7 +1171,7 @@ Timeout: SSM agent did not become ready after 5 minutes
 2. **Controlla che il Security Group consenta il tuo IP:**
    ```bash
    aws ec2 describe-security-groups \
-     --filters "Name=tag:costcenter,Values=<nome-stack>" \
+     --filters "Name=tag:CostCenter,Values=<nome-stack>" \
      --query 'SecurityGroups[0].IpPermissions'
    ```
    
@@ -1229,17 +1305,17 @@ Error: Unable to detect public IP. Please use --allowed-cidr <your-ip>/32 instea
 
 1. **Verifica l'integrità del file:**
    ```bash
-   cat ~/.another-vpn/<nome-stack>/clients/client-1.conf
+   cat ./another_betterthannothing_vpn_config/<nome-stack>/clients/client-1.conf
    ```
    
    Dovrebbe contenere sezioni `[Interface]` e `[Peer]` con tutti i campi richiesti.
 
 2. **Controlla i permessi del file:**
    ```bash
-   ls -la ~/.another-vpn/<nome-stack>/clients/client-1.conf
+   ls -la ./another_betterthannothing_vpn_config/<nome-stack>/clients/client-1.conf
    # Dovrebbe essere -rw------- (600)
    
-   chmod 600 ~/.another-vpn/<nome-stack>/clients/client-1.conf
+   chmod 600 ./another_betterthannothing_vpn_config/<nome-stack>/clients/client-1.conf
    ```
 
 3. **Rigenera la configurazione:**
@@ -1319,11 +1395,6 @@ Se sei ancora bloccato:
 
 1. **Controlla i log di AWS CloudTrail** per errori API
 2. **Rivedi gli eventi dello stack CloudFormation** per messaggi di errore dettagliati
-3. **Apri un issue** sul repository del progetto con:
-   - Comando che hai eseguito
-   - Messaggio di errore
-   - Eventi dello stack (rimuovi informazioni sensibili)
-   - Regione AWS e tipo di istanza
 
 
 ## Pulizia
@@ -1349,7 +1420,7 @@ Per rimuovere tutte le risorse AWS e smettere di incorrere in costi:
 - ✅ Volumi EBS
 
 **Cosa NON viene eliminato:**
-- ❌ File di configurazione client locali in `~/.another-vpn/`
+- ❌ File di configurazione client locali in `./another_betterthannothing_vpn_config/`
 - ❌ Log CloudWatch (se hai abilitato VPC Flow Logs)
 - ❌ Qualsiasi dato che hai memorizzato sull'istanza
 
@@ -1359,10 +1430,10 @@ I file di configurazione client sono memorizzati localmente e contengono chiavi 
 
 ```bash
 # Elimina le configurazioni per uno stack specifico
-rm -rf ~/.another-vpn/<nome-stack>/
+rm -rf ./another_betterthannothing_vpn_config/<nome-stack>/
 
 # Elimina tutte le configurazioni VPN
-rm -rf ~/.another-vpn/
+rm -rf ./another_betterthannothing_vpn_config/
 ```
 
 ### Verificare l'Eliminazione
@@ -1380,7 +1451,7 @@ aws cloudformation describe-stacks --stack-name <nome-stack>
 
 # Controlla risorse orfane (raro, ma possibile)
 aws ec2 describe-instances \
-  --filters "Name=tag:costcenter,Values=<nome-stack>" \
+  --filters "Name=tag:CostCenter,Values=<nome-stack>" \
   --query 'Reservations[*].Instances[*].[InstanceId,State.Name]'
 # Dovrebbe restituire vuoto
 ```
@@ -1418,7 +1489,7 @@ Una volta eliminato lo stack, dovresti vedere:
 
 **Verifica costo zero:**
 1. Aspetta 24-48 ore per l'aggiornamento della fatturazione
-2. Controlla AWS Cost Explorer filtrato per `costcenter=<nome-stack>`
+2. Controlla AWS Cost Explorer filtrato per `CostCenter=<nome-stack>`
 3. Non dovrebbero esserci nuovi costi dopo il timestamp di eliminazione
 
 ### Risoluzione dei Problemi di Eliminazione
@@ -1447,7 +1518,7 @@ Reason: resource sg-xxxxx has a dependent object
    ```bash
    # Trova ed elimina l'ENI manualmente
    aws ec2 describe-network-interfaces \
-     --filters "Name=tag:costcenter,Values=<nome-stack>"
+     --filters "Name=tag:CostCenter,Values=<nome-stack>"
    
    aws ec2 delete-network-interface --network-interface-id <eni-id>
    ```
@@ -1475,13 +1546,15 @@ Reason: resource sg-xxxxx has a dependent object
 2. **Imposta promemoria nel calendario:** Se crei una VPN per un'attività specifica, imposta un promemoria per eliminarla
 3. **Usa AWS Budgets:** Imposta avvisi per notificarti di costi imprevisti
 4. **Audit regolari:** Esegui periodicamente il comando `list` per controllare stack dimenticati
-5. **Tagga tutto:** Il tag `costcenter` rende facile tracciare e pulire le risorse
+5. **Tagga tutto:** Il tag `CostCenter` rende facile tracciare e pulire le risorse
 
 ---
 
 ## Licenza
 
-Questo progetto è fornito così com'è per uso educativo e personale. Usa a tuo rischio e pericolo.
+Questo progetto è fornito così com’è per uso educativo e personale, sotto licenza Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0), e viene utilizzato a proprio rischio.
+
+Vedi il file [LICENSE](LICENSE) per i dettagli.
 
 ## Contribuire
 
@@ -1491,7 +1564,7 @@ I contributi sono benvenuti! Apri un issue o una pull request sul repository del
 
 - **WireGuard:** Protocollo VPN moderno, veloce e sicuro
 - **AWS Systems Manager:** Accesso sicuro alle istanze senza SSH
-- **CloudFormation:** Infrastructure as Code per distribuzioni riproducibili
+- **AWS CloudFormation:** Infrastructure as Code per distribuzioni riproducibili
 
 ---
 

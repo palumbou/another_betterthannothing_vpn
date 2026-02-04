@@ -66,7 +66,7 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-vpc'
-        - Key: costcenter
+        - Key: CostCenter
           Value: !Ref AWS::StackName
 
   PublicSubnet:
@@ -79,7 +79,7 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-public-subnet'
-        - Key: costcenter
+        - Key: CostCenter
           Value: !Ref AWS::StackName
 
   InternetGateway:
@@ -88,7 +88,7 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-igw'
-        - Key: costcenter
+        - Key: CostCenter
           Value: !Ref AWS::StackName
 
   VPCGatewayAttachment:
@@ -104,7 +104,7 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-public-rt'
-        - Key: costcenter
+        - Key: CostCenter
           Value: !Ref AWS::StackName
 
   DefaultPublicRoute:
@@ -140,7 +140,7 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-vpn-sg'
-        - Key: costcenter
+        - Key: CostCenter
           Value: !Ref AWS::StackName
 
   VpnInstanceRole:
@@ -159,7 +159,7 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-vpn-instance-role'
-        - Key: costcenter
+        - Key: CostCenter
           Value: !Ref AWS::StackName
 
   VpnInstanceProfile:
@@ -218,7 +218,7 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-vpn-server'
-        - Key: costcenter
+        - Key: CostCenter
           Value: !Ref AWS::StackName
 
   VpnEIP:
@@ -229,7 +229,7 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-eip'
-        - Key: costcenter
+        - Key: CostCenter
           Value: !Ref AWS::StackName
 
   VpnEIPAssociation:

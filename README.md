@@ -1,14 +1,16 @@
-# another_betterthannothing_vpn
+# Another Betterthannothing VPN
 
 A disposable VPN infrastructure on AWS with minimal attack surface and complete lifecycle automation.
 
+> **Available languages**: [English (current)](README.md) | [Italiano](README.IT.md)
+
 ## Overview
 
-`another_betterthannothing_vpn` creates a dedicated AWS VPC with an EC2 instance running WireGuard VPN, manageable entirely through CloudFormation and a single Bash script. The infrastructure supports both full-tunnel (all traffic through VPN) and split-tunnel (only VPC traffic through VPN) modes, with secure access via AWS Systems Manager (SSM) only—no public SSH exposure.
+`Another Betterthannothing VPN` creates a dedicated AWS VPC with an EC2 instance running WireGuard VPN, manageable entirely through CloudFormation and a single Bash script. The infrastructure supports both full-tunnel (all traffic through VPN) and split-tunnel (only VPC traffic through VPN) modes, with secure access via AWS Systems Manager (SSM) only—no public SSH exposure.
 
 **Key Features:**
 - 🔒 **Secure by default**: SSM-only access, no SSH exposure, IMDSv2 enforced
-- 💰 **Cost transparent**: All resources tagged with `costcenter` for accurate tracking
+- 💰 **Cost transparent**: All resources tagged with `CostCenter` for accurate tracking
 - ⚡ **Single-command deployment**: Create, configure, and generate client configs in one step
 - 🌍 **Multi-region support**: Deploy VPN infrastructure in any AWS region
 - 🔄 **Ephemeral**: Designed for temporary use cases, easy to create and destroy
@@ -22,6 +24,7 @@ A disposable VPN infrastructure on AWS with minimal attack surface and complete 
 - [Quick Start](#quick-start)
 - [CLI Reference](#cli-reference)
 - [Understanding CIDR Parameters](#understanding-cidr-parameters)
+- [Elastic IP (EIP) Support](#elastic-ip-eip-support)
 - [Security Best Practices](#security-best-practices)
 - [Cost Considerations](#cost-considerations)
 - [Examples](#examples)
@@ -218,7 +221,7 @@ Stack creation complete!
 Instance ready, bootstrapping VPN server...
 VPN server configured successfully!
 
-Client configuration saved to: ~/.another-vpn/another-20260201-a3f9/clients/client-1.conf
+Client configuration saved to: ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-1.conf
 
 Connection Instructions:
   Endpoint: 54.123.45.67:51820
@@ -249,7 +252,7 @@ Full-tunnel mode routes ALL traffic through the VPN:
 **Linux/macOS:**
 ```bash
 # Copy config to WireGuard directory
-sudo cp ~/.another-vpn/another-20260201-a3f9/clients/client-1.conf /etc/wireguard/
+sudo cp ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-1.conf /etc/wireguard/
 
 # Start the VPN
 sudo wg-quick up client-1
@@ -293,8 +296,9 @@ Create a new VPN stack with all infrastructure and configuration.
 - `--vpc-cidr <cidr>` - VPC CIDR block (default: 10.10.0.0/16, must be RFC 1918 private range)
 - `--instance-type <type>` - EC2 instance type (default: t4g.nano)
 - `--spot` - Use EC2 Spot instances for lower cost (can be interrupted)
+- `--eip` - Allocate an Elastic IP for persistent public IP address
 - `--clients <n>` - Number of initial client configs to generate (default: 1)
-- `--output-dir <path>` - Output directory for client configs (default: ~/.another-vpn)
+- `--output-dir <path>` - Output directory for client configs (default: ./another_betterthannothing_vpn_config)
 - `--yes` - Skip confirmation prompts
 
 **Examples:**
@@ -313,6 +317,9 @@ Create a new VPN stack with all infrastructure and configuration.
 
 # Custom VPC CIDR to avoid conflicts
 ./another_betterthannothing_vpn.sh create --my-ip --vpc-cidr 172.16.0.0/16
+
+# Create VPN with Elastic IP (persistent IP address)
+./another_betterthannothing_vpn.sh create --my-ip --eip
 ```
 
 #### `delete`
@@ -405,7 +412,7 @@ Generate a new client configuration for an existing VPN stack.
 **Output:**
 ```
 Generating new client configuration...
-Client configuration saved to: ~/.another-vpn/another-20260201-a3f9/clients/client-2.conf
+Client configuration saved to: ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-2.conf
 
 Connection Instructions:
   Endpoint: 54.123.45.67:51820
@@ -534,28 +541,28 @@ The system uses **two distinct CIDR parameters** with different purposes. Unders
 │  VPC CIDR (--vpc-cidr)                                      │
 │  "What is the internal network range?"                      │
 │                                                             │
-│  ┌───────────────────────────────────────────────────────┐ │
-│  │  VPC: 10.10.0.0/16                                    │ │
-│  │  ┌─────────────────────────────────────────────────┐ │ │
-│  │  │  Subnet: 10.10.1.0/24                           │ │ │
-│  │  │  ┌───────────────────────────────────────────┐  │ │ │
-│  │  │  │  EC2 Instance: 10.10.1.42                 │  │ │ │
-│  │  │  └───────────────────────────────────────────┘  │ │ │
-│  │  └─────────────────────────────────────────────────┘ │ │
-│  └───────────────────────────────────────────────────────┘ │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  VPC: 10.10.0.0/16                                    │  │
+│  │  ┌─────────────────────────────────────────────────┐  │  │
+│  │  │  Subnet: 10.10.1.0/24                           │  │  │
+│  │  │  ┌───────────────────────────────────────────┐  │  │  │
+│  │  │  │  EC2 Instance: 10.10.1.42                 │  │  │  │
+│  │  │  └───────────────────────────────────────────┘  │  │  │
+│  │  └─────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│  Allowed Ingress CIDR (--allowed-cidr / --my-ip)           │
+│  Allowed Ingress CIDR (--allowed-cidr / --my-ip)            │
 │  "Who can connect to the VPN?"                              │
 │                                                             │
 │  Internet                                                   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  Your IP: 203.0.113.42/32  ✅ ALLOWED                │   │
-│  └─────────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  Other IP: 198.51.100.99   ❌ BLOCKED                │   │
-│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  Your IP: 203.0.113.42/32  ✅ ALLOWED               │    │
+│  └─────────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  Other IP: 198.51.100.99   ❌ BLOCKED               │    │
+│  └─────────────────────────────────────────────────────┘    │
 │                                                             │
 │  Security Group Rule:                                       │
 │  Allow UDP/51820 from 203.0.113.42/32                       │
@@ -585,6 +592,75 @@ The system uses **two distinct CIDR parameters** with different purposes. Unders
   --my-ip \                    # Access control: only my IP
   --vpc-cidr 172.16.0.0/16     # Internal network: custom range
 ```
+
+## Elastic IP (EIP) Support
+
+### What is an Elastic IP?
+
+An Elastic IP (EIP) is a static, public IPv4 address that persists even when you stop and start your EC2 instance. Without an EIP, your VPN server gets a new public IP address every time the instance is stopped and restarted, requiring you to regenerate all client configurations.
+
+### When to Use EIP
+
+**Use EIP when:**
+- ✅ You plan to stop/start the instance frequently to save costs
+- ✅ You need a persistent VPN endpoint that doesn't change
+- ✅ You want to avoid regenerating client configurations after instance restarts
+- ✅ You're using the VPN for longer-term projects (weeks/months)
+
+**Skip EIP when:**
+- ❌ You're creating a truly ephemeral VPN (create → use → delete in one session)
+- ❌ You want to minimize costs (EIP costs ~$3.60/month when instance is stopped)
+- ❌ You don't mind regenerating client configs if the IP changes
+
+### Cost Considerations
+
+**EIP Pricing (as of 2026):**
+- **While instance is running:** Free (no additional charge)
+- **While instance is stopped:** ~$0.005/hour = ~$3.60/month
+- **If not associated with an instance:** ~$0.005/hour = ~$3.60/month
+
+**Example cost scenarios:**
+
+| Scenario | Without EIP | With EIP |
+|----------|-------------|----------|
+| Always running (730h/month) | $3.02/month | $3.02/month (no extra cost) |
+| Run 8h/day, stop 16h/day | $1.01/month | $2.81/month ($1.80 EIP charge) |
+| Run 1 day/week, stopped rest | $0.43/month | $3.17/month ($2.74 EIP charge) |
+
+**Key insight:** EIP is cost-effective if your instance runs most of the time. If you stop the instance frequently, EIP adds significant cost.
+
+### How to Use EIP
+
+To allocate an Elastic IP for your VPN server, use the `--eip` flag when creating the stack:
+
+```bash
+# Create VPN with Elastic IP
+./another_betterthannothing_vpn.sh create --my-ip --eip
+
+# With other options
+./another_betterthannothing_vpn.sh create --my-ip --eip --mode full --region eu-west-1
+```
+
+The Elastic IP will be automatically allocated and associated with your VPN instance. The IP address will persist even if you stop and start the instance.
+
+### What Happens Without EIP
+
+When you stop and start an EC2 instance without an EIP:
+
+1. **Instance stops:** VPN becomes unavailable
+2. **Instance starts:** AWS assigns a new random public IP
+3. **Client configs break:** All existing client configurations point to the old IP
+4. **Manual fix required:** You must:
+   - Get the new IP: `./another_betterthannothing_vpn.sh status --name <stack-name>`
+   - Regenerate all client configs: `./another_betterthannothing_vpn.sh add-client --name <stack-name>`
+   - Redistribute new configs to all devices
+
+### Best Practices
+
+1. **For ephemeral VPNs (hours/days):** Skip EIP, delete the stack when done
+2. **For persistent VPNs (weeks/months):** Use EIP to avoid IP changes
+3. **For cost optimization:** If using EIP, keep the instance running or delete the stack entirely (don't leave it stopped)
+4. **For testing:** Start without EIP, add it later if needed (requires stack recreation)
 
 ## Security Best Practices
 
@@ -641,13 +717,13 @@ Client configuration files contain private keys. Protect them:
 
 ```bash
 # Verify permissions (should be 600)
-ls -la ~/.another-vpn/*/clients/*.conf
+ls -la ./another_betterthannothing_vpn_config/*/clients/*.conf
 
 # If needed, fix permissions
-chmod 600 ~/.another-vpn/*/clients/*.conf
+chmod 600 ./another_betterthannothing_vpn_config/*/clients/*.conf
 
 # Delete configs when no longer needed
-rm -rf ~/.another-vpn/another-20260201-a3f9/
+rm -rf ./another_betterthannothing_vpn_config/another-20260201-a3f9/
 ```
 
 ### 5. Use Split-Tunnel Mode When Possible
@@ -667,10 +743,10 @@ Split-tunnel mode (`--mode split`) only routes VPC traffic through the VPN, leav
 
 ### 6. Monitor Costs with Tags
 
-All resources are tagged with `costcenter=<stack-name>`. Use AWS Cost Explorer to track spending:
+All resources are tagged with `CostCenter=<stack-name>`. Use AWS Cost Explorer to track spending:
 
 1. Go to AWS Cost Explorer
-2. Filter by tag: `costcenter = another-20260201-a3f9`
+2. Filter by tag: `CostCenter = another-20260201-a3f9`
 3. View costs by service (EC2, data transfer, etc.)
 
 ### 7. Enable VPC Flow Logs (Optional)
@@ -684,7 +760,7 @@ aws ec2 create-flow-logs \
   --resource-ids <vpc-id> \
   --traffic-type ALL \
   --log-destination-type cloud-watch-logs \
-  --log-group-name /aws/vpc/another-vpn
+  --log-group-name /aws/vpc/another-betterthannothing-vpn
 ```
 
 **Note:** Flow Logs incur additional costs (~$0.50 per GB ingested).
@@ -792,12 +868,12 @@ Assuming 10 GB/month of VPN traffic:
 
 ### Cost Tracking with Tags
 
-All resources are tagged with `costcenter=<stack-name>`. Use this to track costs:
+All resources are tagged with `CostCenter=<stack-name>`. Use this to track costs:
 
 **AWS Cost Explorer:**
 1. Navigate to AWS Cost Explorer
 2. Click "Cost & Usage Reports"
-3. Add filter: Tag → `costcenter` → `<your-stack-name>`
+3. Add filter: Tag → `CostCenter` → `<your-stack-name>`
 4. View breakdown by service
 
 **AWS CLI:**
@@ -812,7 +888,7 @@ aws ce get-cost-and-usage \
 # filter.json:
 {
   "Tags": {
-    "Key": "costcenter",
+    "Key": "CostCenter",
     "Values": ["another-20260201-a3f9"]
   }
 }
@@ -837,7 +913,7 @@ aws budgets create-budget \
   "TimeUnit": "MONTHLY",
   "BudgetType": "COST",
   "CostFilters": {
-    "TagKeyValue": ["user:costcenter$another-*"]
+    "TagKeyValue": ["user:CostCenter$another-*"]
   }
 }
 ```
@@ -901,9 +977,9 @@ You need VPN access from laptop, phone, and tablet:
 ./another_betterthannothing_vpn.sh create --my-ip --clients 3
 
 # Configs are generated:
-# ~/.another-vpn/another-20260201-a3f9/clients/client-1.conf (laptop)
-# ~/.another-vpn/another-20260201-a3f9/clients/client-2.conf (phone)
-# ~/.another-vpn/another-20260201-a3f9/clients/client-3.conf (tablet)
+# ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-1.conf (laptop)
+# ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-2.conf (phone)
+# ./another_betterthannothing_vpn_config/another-20260201-a3f9/clients/client-3.conf (tablet)
 
 # Transfer configs to devices (AirDrop, email, etc.)
 # Import each config to the respective device's WireGuard app
@@ -1075,7 +1151,7 @@ Timeout: SSM agent did not become ready after 5 minutes
    ./another_betterthannothing_vpn.sh status --name <stack-name>
    
    # Compare with client config
-   grep Endpoint ~/.another-vpn/<stack-name>/clients/client-1.conf
+   grep Endpoint ./another_betterthannothing_vpn_config/<stack-name>/clients/client-1.conf
    ```
    
    If IPs don't match (instance was stopped/started), regenerate client config:
@@ -1086,7 +1162,7 @@ Timeout: SSM agent did not become ready after 5 minutes
 2. **Check Security Group allows your IP:**
    ```bash
    aws ec2 describe-security-groups \
-     --filters "Name=tag:costcenter,Values=<stack-name>" \
+     --filters "Name=tag:CostCenter,Values=<stack-name>" \
      --query 'SecurityGroups[0].IpPermissions'
    ```
    
@@ -1219,17 +1295,17 @@ Error: Unable to detect public IP. Please use --allowed-cidr <your-ip>/32 instea
 
 1. **Verify file integrity:**
    ```bash
-   cat ~/.another-vpn/<stack-name>/clients/client-1.conf
+   cat ./another_betterthannothing_vpn_config/<stack-name>/clients/client-1.conf
    ```
    
    Should contain `[Interface]` and `[Peer]` sections with all required fields.
 
 2. **Check file permissions:**
    ```bash
-   ls -la ~/.another-vpn/<stack-name>/clients/client-1.conf
+   ls -la ./another_betterthannothing_vpn_config/<stack-name>/clients/client-1.conf
    # Should be -rw------- (600)
    
-   chmod 600 ~/.another-vpn/<stack-name>/clients/client-1.conf
+   chmod 600 ./another_betterthannothing_vpn_config/<stack-name>/clients/client-1.conf
    ```
 
 3. **Regenerate configuration:**
@@ -1309,11 +1385,7 @@ If you're still stuck:
 
 1. **Check AWS CloudTrail logs** for API errors
 2. **Review CloudFormation stack events** for detailed error messages
-3. **Open an issue** on the project repository with:
-   - Command you ran
-   - Error message
-   - Stack events (sanitize sensitive info)
-   - AWS region and instance type
+
 
 ## Cleanup
 
@@ -1338,7 +1410,7 @@ To remove all AWS resources and stop incurring costs:
 - ✅ EBS volumes
 
 **What does NOT get deleted:**
-- ❌ Local client configuration files in `~/.another-vpn/`
+- ❌ Local client configuration files in `./another_betterthannothing_vpn_config/`
 - ❌ CloudWatch Logs (if you enabled VPC Flow Logs)
 - ❌ Any data you stored on the instance
 
@@ -1348,10 +1420,10 @@ Client configuration files are stored locally and contain private keys. Delete t
 
 ```bash
 # Delete configs for a specific stack
-rm -rf ~/.another-vpn/<stack-name>/
+rm -rf ./another_betterthannothing_vpn_config/<stack-name>/
 
 # Delete all VPN configs
-rm -rf ~/.another-vpn/
+rm -rf ./another_betterthannothing_vpn_config/
 ```
 
 ### Verifying Deletion
@@ -1369,7 +1441,7 @@ aws cloudformation describe-stacks --stack-name <stack-name>
 
 # Check for orphaned resources (rare, but possible)
 aws ec2 describe-instances \
-  --filters "Name=tag:costcenter,Values=<stack-name>" \
+  --filters "Name=tag:CostCenter,Values=<stack-name>" \
   --query 'Reservations[*].Instances[*].[InstanceId,State.Name]'
 # Should return empty
 ```
@@ -1407,7 +1479,7 @@ Once the stack is deleted, you should see:
 
 **Verify zero cost:**
 1. Wait 24-48 hours for billing to update
-2. Check AWS Cost Explorer filtered by `costcenter=<stack-name>`
+2. Check AWS Cost Explorer filtered by `CostCenter=<stack-name>`
 3. Should show no new charges after deletion timestamp
 
 ### Troubleshooting Deletion Failures
@@ -1436,7 +1508,7 @@ Reason: resource sg-xxxxx has a dependent object
    ```bash
    # Find and delete ENI manually
    aws ec2 describe-network-interfaces \
-     --filters "Name=tag:costcenter,Values=<stack-name>"
+     --filters "Name=tag:CostCenter,Values=<stack-name>"
    
    aws ec2 delete-network-interface --network-interface-id <eni-id>
    ```
@@ -1464,13 +1536,15 @@ Reason: resource sg-xxxxx has a dependent object
 2. **Set calendar reminders:** If you create a VPN for a specific task, set a reminder to delete it
 3. **Use AWS Budgets:** Set up alerts to notify you of unexpected costs
 4. **Regular audits:** Periodically run `list` command to check for forgotten stacks
-5. **Tag everything:** The `costcenter` tag makes it easy to track and clean up resources
+5. **Tag everything:** The `CostCenter` tag makes it easy to track and clean up resources
 
 ---
 
 ## License
 
-This project is provided as-is for educational and personal use. Use at your own risk.
+This project is provided as-is for educational and personal use, under the Creative Commons Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0), and is used at your own risk.
+
+See the [LICENSE](LICENSE) file for details.
 
 ## Contributing
 
@@ -1480,7 +1554,7 @@ Contributions are welcome! Please open an issue or pull request on the project r
 
 - **WireGuard:** Modern, fast, and secure VPN protocol
 - **AWS Systems Manager:** Secure instance access without SSH
-- **CloudFormation:** Infrastructure as Code for reproducible deployments
+- **AWS CloudFormation:** Infrastructure as Code for reproducible deployments
 
 ---
 
