@@ -801,6 +801,24 @@ bootstrap_vpn_server() {
     # Step 4: Create WireGuard configuration file
     echo "[4/7] Creating WireGuard configuration..." >&2
     
+    # Detect the primary network interface (not eth0 on all instance types)
+    local primary_interface
+    if ! primary_interface=$(execute_remote_command "$instance_id" "$region" \
+        "ip route show default | awk '/default/ {print \$5}' | head -1" 60); then
+        echo "" >&2
+        echo "Error: Failed to detect primary network interface" >&2
+        return 1
+    fi
+    primary_interface=$(echo "$primary_interface" | tr -d '\n\r' | xargs)
+    
+    # Fallback to eth0 if detection fails
+    if [ -z "$primary_interface" ]; then
+        primary_interface="eth0"
+        echo "      Warning: Could not detect primary interface, using eth0" >&2
+    else
+        echo "      Primary interface: $primary_interface" >&2
+    fi
+    
     # Build the configuration file content
     local wg_config="[Interface]
 Address = 10.99.0.1/24
@@ -810,8 +828,8 @@ PrivateKey = $server_private_key"
     # Add PostUp/PostDown iptables rules if mode is full-tunnel
     if [ "$mode" = "full" ]; then
         wg_config="$wg_config
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE"
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $primary_interface -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $primary_interface -j MASQUERADE"
         echo "      Mode: Full-tunnel (NAT enabled)" >&2
     else
         echo "      Mode: Split-tunnel (no NAT)" >&2

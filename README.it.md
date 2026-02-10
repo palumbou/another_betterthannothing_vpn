@@ -130,6 +130,31 @@ make
 # Copia gli artefatti sul tuo laptop tramite S3 o SCP attraverso la VPN
 ```
 
+### Accesso ai Servizi sul Server VPN
+
+Per accedere ai servizi in esecuzione sul server VPN stesso (container Docker, Apache, database, ecc.) dal tuo client VPN, usa il flag `--reach-server` quando crei la VPN:
+
+```bash
+./another_betterthannothing_vpn.sh create --my-ip --reach-server
+```
+
+Questo aggiunge la subnet VPN (`10.99.0.0/24`) agli AllowedIPs del client, permettendoti di raggiungere il server a `10.99.0.1`.
+
+**Importante:** I servizi devono fare bind su `0.0.0.0` o `10.99.0.1` per essere raggiungibili via VPN:
+
+```bash
+# All'interno del server VPN (via SSM)
+
+# Docker: esponi su tutte le interfacce
+sudo docker run -d -p 0.0.0.0:8080:80 nginx
+
+# Oppure fai bind specificamente sull'interfaccia VPN
+sudo docker run -d -p 10.99.0.1:8080:80 nginx
+
+# Dal tuo laptop (connesso alla VPN)
+curl http://10.99.0.1:8080
+```
+
 **Vantaggi:**
 - 🧹 **Tabula rasa**: ambiente fresco ogni volta, nessuna dipendenza residua
 - 💸 **Conveniente**: paghi solo per ciò che usi, distruggi quando hai finito

@@ -129,6 +129,31 @@ make
 # Copy artifacts back to your laptop via S3 or SCP through VPN
 ```
 
+### Accessing Services on the VPN Server
+
+To access services running on the VPN server itself (Docker containers, Apache, databases, etc.) from your VPN client, use the `--reach-server` flag when creating the VPN:
+
+```bash
+./another_betterthannothing_vpn.sh create --my-ip --reach-server
+```
+
+This adds the VPN subnet (`10.99.0.0/24`) to the client's AllowedIPs, allowing you to reach the server at `10.99.0.1`.
+
+**Important:** Services must bind to `0.0.0.0` or `10.99.0.1` to be reachable via VPN:
+
+```bash
+# Inside the VPN server (via SSM)
+
+# Docker: expose on all interfaces
+sudo docker run -d -p 0.0.0.0:8080:80 nginx
+
+# Or bind specifically to VPN interface
+sudo docker run -d -p 10.99.0.1:8080:80 nginx
+
+# From your laptop (connected to VPN)
+curl http://10.99.0.1:8080
+```
+
 **Benefits:**
 - 🧹 **Clean slate**: Fresh environment every time, no leftover dependencies
 - 💸 **Cost-effective**: Pay only for what you use, destroy when done
