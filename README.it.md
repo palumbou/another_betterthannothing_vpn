@@ -762,7 +762,35 @@ chmod 600 ./another_betterthannothing_vpn_config/*/clients/*.conf
 rm -rf ./another_betterthannothing_vpn_config/abthn-vpn-20260201-a3f9/
 ```
 
-### 5. Usa la Modalità Split-Tunnel Quando Possibile
+### 5. Funzionalità di Sicurezza WireGuard
+
+Questa VPN implementa diverse best practice di sicurezza WireGuard:
+
+**PresharedKey (Resistenza Post-Quantum):**
+Ogni connessione client utilizza una PresharedKey unica oltre alla coppia standard di chiavi pubblica/privata. Questo fornisce un ulteriore livello di crittografia simmetrica che offre protezione contro potenziali futuri attacchi di computer quantistici.
+
+**Ottimizzazione MTU:**
+L'MTU è impostato a 1360 byte per prevenire problemi di frammentazione comuni con tunnel VPN su connessioni EC2/NAT, garantendo connessioni stabili e affidabili.
+
+**Archiviazione Chiavi:**
+- Le configurazioni client (file `.conf`) sono salvate con permessi 600
+- Le chiavi pubbliche sono salvate separatamente nella directory `keys/` per riferimento
+- Le chiavi private non lasciano mai il file di configurazione client
+
+```bash
+# Struttura directory di output
+./another_betterthannothing_vpn_config/abthn-vpn-XXXXXXXX-XXXX/
+├── clients/
+│   ├── client-1.conf    # Config WireGuard completa (chiave privata inclusa)
+│   └── client-2.conf
+├── keys/
+│   ├── server.pub       # Chiave pubblica del server
+│   ├── client-1.pub     # Chiave pubblica client 1
+│   └── client-2.pub     # Chiave pubblica client 2
+└── metadata.json        # Metadati dello stack
+```
+
+### 6. Usa la Modalità Split-Tunnel Quando Possibile
 
 La modalità split-tunnel (`--mode split`) instrada solo il traffico VPC attraverso la VPN, lasciando il traffico internet sulla tua connessione locale:
 
@@ -777,7 +805,7 @@ La modalità split-tunnel (`--mode split`) instrada solo il traffico VPC attrave
 - Sei su una rete non affidabile (WiFi pubblico)
 - Devi aggirare restrizioni basate su IP
 
-### 6. Monitora i Costi con i Tag
+### 7. Monitora i Costi con i Tag
 
 Tutte le risorse sono taggate con `CostCenter=<nome-stack>`. Usa AWS Cost Explorer per tracciare la spesa:
 
@@ -785,7 +813,7 @@ Tutte le risorse sono taggate con `CostCenter=<nome-stack>`. Usa AWS Cost Explor
 2. Filtra per tag: `CostCenter = abthn-vpn-20260201-a3f9`
 3. Visualizza i costi per servizio (EC2, trasferimento dati, ecc.)
 
-### 7. Abilita VPC Flow Logs (Opzionale)
+### 8. Abilita VPC Flow Logs (Opzionale)
 
 Per tracce di audit, abilita VPC Flow Logs:
 
@@ -801,7 +829,7 @@ aws ec2 create-flow-logs \
 
 **Nota:** I Flow Logs comportano costi aggiuntivi (~$0.50 per GB ingerito).
 
-### 8. IMDSv2 è Applicato
+### 9. IMDSv2 è Applicato
 
 Il template CloudFormation applica IMDSv2 (Instance Metadata Service versione 2) per prevenire attacchi SSRF:
 

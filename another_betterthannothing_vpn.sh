@@ -360,14 +360,14 @@ detect_instance_architecture() {
 detect_my_ip() {
     local detected_ip=""
     
-    # Primary method: ipify.org
+    # Primary method: ipify.org (force IPv4 with -4)
     if command -v curl &> /dev/null; then
-        detected_ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
+        detected_ip=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
     fi
     
-    # Fallback method: OpenDNS resolver
+    # Fallback method: OpenDNS resolver (IPv4 only)
     if [ -z "$detected_ip" ] && command -v dig &> /dev/null; then
-        detected_ip=$(dig +short myip.opendns.com @resolver1.opendns.com 2>/dev/null | grep -v ';' | head -n1 || true)
+        detected_ip=$(dig +short -4 myip.opendns.com @resolver1.opendns.com 2>/dev/null | grep -v ';' | head -n1 || true)
     fi
     
     # Check if we got an IP
@@ -823,7 +823,8 @@ bootstrap_vpn_server() {
     local wg_config="[Interface]
 Address = 10.99.0.1/24
 ListenPort = $vpn_port
-PrivateKey = $server_private_key"
+PrivateKey = $server_private_key
+MTU = 1360"
     
     # Add PostUp/PostDown iptables rules if mode is full-tunnel
     if [ "$mode" = "full" ]; then
@@ -991,10 +992,31 @@ generate_client_config() {
         return 1
     fi
     
-    # Step 2: Add peer to server config
+    # Step 2: Generate preshared key for additional security (post-quantum resistance)
+    echo "  Generating preshared key..."
+    local preshared_key
+    if ! preshared_key=$(execute_remote_command "$instance_id" "$region" \
+        "wg genpsk" 60); then
+        echo "" >&2
+        echo "Error: Failed to generate preshared key for $client_name" >&2
+        return 1
+    fi
+    
+    # Remove any trailing whitespace/newlines
+    preshared_key=$(echo "$preshared_key" | tr -d '\n\r' | xargs)
+    
+    # Validate preshared key format
+    if [ ${#preshared_key} -ne 44 ]; then
+        echo "" >&2
+        echo "Error: Generated preshared key has unexpected format (length: ${#preshared_key}, expected: 44)" >&2
+        return 1
+    fi
+    
+    # Step 3: Add peer to server config with preshared key
     echo "  Adding peer to server configuration..."
+    # Create temp file for preshared key, set peer, then remove
     if ! execute_remote_command "$instance_id" "$region" \
-        "sudo wg set wg0 peer $client_public_key allowed-ips 10.99.0.$client_id/32" 60; then
+        "echo '$preshared_key' | sudo tee /tmp/psk_$client_id.key > /dev/null && sudo wg set wg0 peer $client_public_key preshared-key /tmp/psk_$client_id.key allowed-ips 10.99.0.$client_id/32 && sudo rm -f /tmp/psk_$client_id.key" 60; then
         echo "" >&2
         echo "Error: Failed to add peer to server config for $client_name" >&2
         echo "" >&2
@@ -1004,7 +1026,7 @@ generate_client_config() {
         return 1
     fi
     
-    # Step 3: Save server config
+    # Step 4: Save server config
     if ! execute_remote_command "$instance_id" "$region" \
         "sudo wg-quick save wg0" 60; then
         echo "" >&2
@@ -1012,7 +1034,7 @@ generate_client_config() {
         return 1
     fi
     
-    # Step 4: Create client config file with [Interface] and [Peer] sections
+    # Step 5: Create client config file with [Interface] and [Peer] sections
     # Set AllowedIPs based on mode and reach_server option
     local allowed_ips
     if [ "$mode" = "full" ]; then
@@ -1034,14 +1056,16 @@ generate_client_config() {
 PrivateKey = $client_private_key
 Address = 10.99.0.$client_id/32
 DNS = 1.1.1.1
+MTU = 1360
 
 [Peer]
 PublicKey = $server_public_key
+PresharedKey = $preshared_key
 Endpoint = $endpoint:$port
 AllowedIPs = $allowed_ips
 PersistentKeepalive = 25"
     
-    # Step 5: Create output directory
+    # Step 6: Create output directory
     local client_dir="$output_dir/$stack_name/clients"
     if ! mkdir -p "$client_dir" 2>/dev/null; then
         echo "" >&2
@@ -1056,7 +1080,7 @@ PersistentKeepalive = 25"
         return 1
     fi
     
-    # Step 6: Write config to file
+    # Step 7: Write config to file
     local config_file="$client_dir/$client_name.conf"
     if ! echo "$client_config" > "$config_file" 2>/dev/null; then
         echo "" >&2
@@ -1068,7 +1092,19 @@ PersistentKeepalive = 25"
         return 1
     fi
     
-    # Step 7: Set file permissions to 600
+    # Step 8: Save public keys to separate files for reference
+    local keys_dir="$output_dir/$stack_name/keys"
+    if ! mkdir -p "$keys_dir" 2>/dev/null; then
+        echo "  Warning: Failed to create keys directory: $keys_dir" >&2
+    else
+        # Save client public key
+        echo "$client_public_key" > "$keys_dir/$client_name.pub" 2>/dev/null
+        # Save server public key (same for all clients, but useful to have)
+        echo "$server_public_key" > "$keys_dir/server.pub" 2>/dev/null
+        chmod 600 "$keys_dir"/*.pub 2>/dev/null || true
+    fi
+    
+    # Step 9: Set file permissions to 600
     if ! chmod 600 "$config_file" 2>/dev/null; then
         echo "" >&2
         echo "Warning: Failed to set permissions on config file: $config_file" >&2
@@ -1077,6 +1113,7 @@ PersistentKeepalive = 25"
     fi
     
     echo "  ✓ Client configuration saved: $config_file"
+    echo "  ✓ Public keys saved: $keys_dir/"
     
     return 0
 }

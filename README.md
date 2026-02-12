@@ -756,7 +756,35 @@ chmod 600 ./another_betterthannothing_vpn_config/*/clients/*.conf
 rm -rf ./another_betterthannothing_vpn_config/abthn-vpn-20260201-a3f9/
 ```
 
-### 5. Use Split-Tunnel Mode When Possible
+### 5. WireGuard Security Features
+
+This VPN implements several WireGuard security best practices:
+
+**PresharedKey (Post-Quantum Resistance):**
+Each client connection uses a unique PresharedKey in addition to the standard public/private key pair. This provides an additional layer of symmetric encryption that offers protection against potential future quantum computing attacks.
+
+**MTU Optimization:**
+MTU is set to 1360 bytes to prevent fragmentation issues common with VPN tunnels over EC2/NAT connections, ensuring stable and reliable connections.
+
+**Key Storage:**
+- Client configurations (`.conf` files) are stored with 600 permissions
+- Public keys are saved separately in the `keys/` directory for reference
+- Private keys never leave the client configuration file
+
+```bash
+# Output directory structure
+./another_betterthannothing_vpn_config/abthn-vpn-XXXXXXXX-XXXX/
+├── clients/
+│   ├── client-1.conf    # Full WireGuard config (private key inside)
+│   └── client-2.conf
+├── keys/
+│   ├── server.pub       # Server public key
+│   ├── client-1.pub     # Client 1 public key
+│   └── client-2.pub     # Client 2 public key
+└── metadata.json        # Stack metadata
+```
+
+### 6. Use Split-Tunnel Mode When Possible
 
 Split-tunnel mode (`--mode split`) only routes VPC traffic through the VPN, leaving internet traffic on your local connection:
 
@@ -771,7 +799,7 @@ Split-tunnel mode (`--mode split`) only routes VPC traffic through the VPN, leav
 - You're on an untrusted network (public WiFi)
 - You need to bypass IP-based restrictions
 
-### 6. Monitor Costs with Tags
+### 7. Monitor Costs with Tags
 
 All resources are tagged with `CostCenter=<stack-name>`. Use AWS Cost Explorer to track spending:
 
@@ -779,7 +807,7 @@ All resources are tagged with `CostCenter=<stack-name>`. Use AWS Cost Explorer t
 2. Filter by tag: `CostCenter = abthn-vpn-20260201-a3f9`
 3. View costs by service (EC2, data transfer, etc.)
 
-### 7. Enable VPC Flow Logs (Optional)
+### 8. Enable VPC Flow Logs (Optional)
 
 For audit trails, enable VPC Flow Logs:
 
@@ -795,7 +823,7 @@ aws ec2 create-flow-logs \
 
 **Note:** Flow Logs incur additional costs (~$0.50 per GB ingested).
 
-### 8. IMDSv2 is Enforced
+### 9. IMDSv2 is Enforced
 
 The CloudFormation template enforces IMDSv2 (Instance Metadata Service version 2) to prevent SSRF attacks:
 
