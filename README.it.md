@@ -652,17 +652,17 @@ Quando crei un router peer:
 ### Creare un Router Peer
 
 ```bash
-# Crea VPN con router peer per LAN 192.168.2.0/24
+# Crea VPN con router peer per LAN 192.168.0.0/24
 ./another_betterthannothing_vpn.sh create --my-ip \
     --peer-type router \
-    --router-subnet 192.168.2.0/24 \
+    --router-subnet 192.168.0.0/24 \
     --mss-clamping
 
 # Subnet LAN multiple
 ./another_betterthannothing_vpn.sh create --my-ip \
     --peer-type router \
-    --router-subnet 192.168.2.0/24 \
-    --router-subnet 192.168.3.0/24 \
+    --router-subnet 192.168.0.0/24 \
+    --router-subnet 192.168.1.0/24 \
     --router-subnet 10.0.0.0/24 \
     --mss-clamping
 ```
@@ -696,7 +696,7 @@ Il `wg0.conf` del server includerà le subnet del router negli AllowedIPs:
 [Peer]
 PublicKey = <chiave-pubblica-router>
 PresharedKey = <chiave-preshared>
-AllowedIPs = 10.99.0.2/32, 192.168.2.0/24, 192.168.3.0/24
+AllowedIPs = 10.99.0.2/32, 192.168.0.0/24, 192.168.1.0/24
 ```
 
 ### Requisiti Setup Router

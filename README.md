@@ -645,17 +645,17 @@ When you create a router peer:
 ### Creating a Router Peer
 
 ```bash
-# Create VPN with router peer for LAN 192.168.2.0/24
+# Create VPN with router peer for LAN 192.168.0.0/24
 ./another_betterthannothing_vpn.sh create --my-ip \
     --peer-type router \
-    --router-subnet 192.168.2.0/24 \
+    --router-subnet 192.168.0.0/24 \
     --mss-clamping
 
 # Multiple LAN subnets
 ./another_betterthannothing_vpn.sh create --my-ip \
     --peer-type router \
-    --router-subnet 192.168.2.0/24 \
-    --router-subnet 192.168.3.0/24 \
+    --router-subnet 192.168.0.0/24 \
+    --router-subnet 192.168.1.0/24 \
     --router-subnet 10.0.0.0/24 \
     --mss-clamping
 ```
@@ -689,7 +689,7 @@ The server's `wg0.conf` will include the router subnets in AllowedIPs:
 [Peer]
 PublicKey = <router-public-key>
 PresharedKey = <preshared-key>
-AllowedIPs = 10.99.0.2/32, 192.168.2.0/24, 192.168.3.0/24
+AllowedIPs = 10.99.0.2/32, 192.168.0.0/24, 192.168.1.0/24
 ```
 
 ### Router Setup Requirements
