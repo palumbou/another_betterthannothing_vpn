@@ -327,6 +327,10 @@ Crea un nuovo stack VPN con tutta l'infrastruttura e la configurazione.
 - `--spot` - Usa istanze EC2 Spot per costi inferiori (possono essere interrotte)
 - `--eip` - Alloca un Elastic IP per un indirizzo IP pubblico persistente
 - `--reach-server` - Include la subnet del server VPN (10.99.0.0/24) negli AllowedIPs del client, permettendo ai client di raggiungere servizi in esecuzione sul server VPN stesso (es. container Docker)
+- `--peer-type <host|router>` - Tipo di peer: `host` (predefinito) per client standard, `router` per site-to-site con subnet LAN
+- `--router-subnet <cidr>` - Subnet LAN dietro il router peer (ripetibile, solo con `--peer-type router`)
+- `--mtu <valore>` - Valore MTU personalizzato (predefinito: 1360)
+- `--mss-clamping` - Abilita MSS clamping per connessioni TCP (utile per router peer)
 - `--clients <n>` - Numero di configurazioni client iniziali da generare (predefinito: 1)
 - `--output-dir <percorso>` - Directory di output per le configurazioni client (predefinito: ./another_betterthannothing_vpn_config)
 - `--yes` - Salta i prompt di conferma
@@ -626,6 +630,94 @@ Il sistema utilizza **due parametri CIDR distinti** con scopi diversi. Comprende
 ./another_betterthannothing_vpn.sh create \
   --my-ip \                    # Controllo accessi: solo il mio IP
   --vpc-cidr 172.16.0.0/16     # Rete interna: intervallo personalizzato
+```
+
+## Router Peers (VPN Site-to-Site)
+
+### Panoramica
+
+I router peer permettono di connettere intere reti LAN alla tua VPN, non solo singoli dispositivi. Questo è utile per:
+- Connettere una rete domestica/ufficio alla VPC AWS
+- VPN site-to-site tra diverse sedi
+- Instradare traffico da dispositivi IoT o server dietro un router
+
+### Come Funziona
+
+Quando crei un router peer:
+1. L'IP VPN del peer E tutte le subnet LAN specificate vengono aggiunte agli AllowedIPs del server
+2. Il traffico dai dispositivi LAN viene instradato attraverso il tunnel VPN
+3. Non viene usato SNAT - routing L3 puro (i dispositivi mantengono i loro IP originali)
+4. MSS clamping opzionale previene problemi di frammentazione TCP
+
+### Creare un Router Peer
+
+```bash
+# Crea VPN con router peer per LAN 192.168.2.0/24
+./another_betterthannothing_vpn.sh create --my-ip \
+    --peer-type router \
+    --router-subnet 192.168.2.0/24 \
+    --mss-clamping
+
+# Subnet LAN multiple
+./another_betterthannothing_vpn.sh create --my-ip \
+    --peer-type router \
+    --router-subnet 192.168.2.0/24 \
+    --router-subnet 192.168.3.0/24 \
+    --router-subnet 10.0.0.0/24 \
+    --mss-clamping
+```
+
+### Esempio Configurazione Router
+
+Sul tuo router (es. OpenWrt, pfSense, router Linux), la configurazione generata apparirà così:
+
+```ini
+[Interface]
+PrivateKey = <chiave-privata-router>
+Address = 10.99.0.2/32
+DNS = 1.1.1.1
+MTU = 1360
+PostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280
+PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280
+
+[Peer]
+PublicKey = <chiave-pubblica-server>
+PresharedKey = <chiave-preshared>
+Endpoint = <ip-server>:51820
+AllowedIPs = 10.10.0.0/16
+PersistentKeepalive = 25
+```
+
+### Configurazione Lato Server
+
+Il `wg0.conf` del server includerà le subnet del router negli AllowedIPs:
+
+```ini
+[Peer]
+PublicKey = <chiave-pubblica-router>
+PresharedKey = <chiave-preshared>
+AllowedIPs = 10.99.0.2/32, 192.168.2.0/24, 192.168.3.0/24
+```
+
+### Requisiti Setup Router
+
+Sul tuo router, devi:
+
+1. **Abilitare IP forwarding** (solitamente già abilitato sui router)
+2. **Aggiungere route** per il CIDR VPC che puntano all'interfaccia WireGuard
+3. **Configurare firewall** per permettere il forwarding tra LAN e WireGuard
+
+Esempio per router Linux:
+```bash
+# Abilita IP forwarding (se non già abilitato)
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
+# Aggiungi route verso VPC via WireGuard
+ip route add 10.10.0.0/16 dev wg0
+
+# Permetti forwarding (iptables)
+iptables -A FORWARD -i eth0 -o wg0 -j ACCEPT
+iptables -A FORWARD -i wg0 -o eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 ```
 
 ## Supporto Elastic IP (EIP)

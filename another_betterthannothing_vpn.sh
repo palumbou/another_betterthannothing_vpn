@@ -937,7 +937,7 @@ WGEOF"
 }
 
 # Generate client configuration
-# Parameters: stack_name, client_name, client_id, mode, vpc_cidr, endpoint, port, server_public_key, instance_id, region, output_dir, reach_server
+# Parameters: stack_name, client_name, client_id, mode, vpc_cidr, endpoint, port, server_public_key, instance_id, region, output_dir, reach_server, peer_type, router_subnets, custom_mtu, mss_clamping
 generate_client_config() {
     local stack_name="$1"
     local client_name="$2"
@@ -951,8 +951,18 @@ generate_client_config() {
     local region="${10}"
     local output_dir="${11}"
     local reach_server="${12:-false}"
+    local peer_type="${13:-host}"
+    local router_subnets="${14:-}"
+    local custom_mtu="${15:-1360}"
+    local mss_clamping="${16:-false}"
     
     echo "Generating client configuration: $client_name (10.99.0.$client_id/32)..."
+    if [ "$peer_type" = "router" ]; then
+        echo "  Peer type: router"
+        if [ -n "$router_subnets" ]; then
+            echo "  Router subnets: $router_subnets"
+        fi
+    fi
     
     # Step 1: Generate client private/public key pair on server via SSM
     local client_private_key
@@ -1014,9 +1024,20 @@ generate_client_config() {
     
     # Step 3: Add peer to server config with preshared key
     echo "  Adding peer to server configuration..."
+    
+    # Build AllowedIPs for server-side peer config
+    # For host: only the peer's VPN IP
+    # For router: peer's VPN IP + all router subnets
+    local server_allowed_ips="10.99.0.$client_id/32"
+    if [ "$peer_type" = "router" ] && [ -n "$router_subnets" ]; then
+        # router_subnets is comma-separated, add each subnet
+        server_allowed_ips="$server_allowed_ips,$router_subnets"
+        echo "  Server AllowedIPs: $server_allowed_ips"
+    fi
+    
     # Create temp file for preshared key, set peer, then remove
     if ! execute_remote_command "$instance_id" "$region" \
-        "echo '$preshared_key' | sudo tee /tmp/psk_$client_id.key > /dev/null && sudo wg set wg0 peer $client_public_key preshared-key /tmp/psk_$client_id.key allowed-ips 10.99.0.$client_id/32 && sudo rm -f /tmp/psk_$client_id.key" 60; then
+        "echo '$preshared_key' | sudo tee /tmp/psk_$client_id.key > /dev/null && sudo wg set wg0 peer $client_public_key preshared-key /tmp/psk_$client_id.key allowed-ips $server_allowed_ips && sudo rm -f /tmp/psk_$client_id.key" 60; then
         echo "" >&2
         echo "Error: Failed to add peer to server config for $client_name" >&2
         echo "" >&2
@@ -1049,6 +1070,9 @@ generate_client_config() {
         fi
     fi
     
+    # Use custom MTU if provided, otherwise default to 1360
+    local mtu_value="${custom_mtu:-1360}"
+    
     # Build client configuration
     # Note: Private key is included in config file (this is expected and required for WireGuard clients)
     # The private key is never logged to stdout/stderr - it only appears in the .conf file
@@ -1056,7 +1080,17 @@ generate_client_config() {
 PrivateKey = $client_private_key
 Address = 10.99.0.$client_id/32
 DNS = 1.1.1.1
-MTU = 1360
+MTU = $mtu_value"
+
+    # Add PostUp/PostDown for MSS clamping if enabled (useful for router peers)
+    if [ "$mss_clamping" = "true" ]; then
+        local mss_value=$((mtu_value - 80))  # MTU - 40 (IP header) - 40 (TCP header)
+        client_config="$client_config
+PostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $mss_value
+PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $mss_value"
+    fi
+
+    client_config="$client_config
 
 [Peer]
 PublicKey = $server_public_key
@@ -1159,10 +1193,39 @@ OPTIONS:
     --reach-server              Include VPN server in AllowedIPs (10.99.0.0/24)
                                 Allows clients to reach services on the VPN server
                                 itself (e.g., Docker containers, local services)
+    --peer-type <host|router>   Peer type (default: host)
+                                  host: Standard VPN client
+                                  router: Site-to-site router with LAN subnets
+    --router-subnet <cidr>      LAN subnet behind router peer (repeatable)
+                                Only used with --peer-type router
+                                Example: --router-subnet 192.168.2.0/24
+    --mtu <value>               Custom MTU value (default: 1360)
+                                Lower values help with fragmentation issues
+    --mss-clamping              Enable MSS clamping for TCP connections
+                                Useful for router peers to avoid fragmentation
     --clients <n>               Number of initial clients (default: 1)
     --output-dir <path>         Output directory (default: ./another_betterthannothing_vpn_config)
     --yes, --non-interactive    Skip confirmations
     --help                      Show this help message
+
+PEER TYPES:
+
+    --peer-type host (default):
+        Standard VPN client for laptops, phones, etc.
+        Only the peer's VPN IP is added to server AllowedIPs.
+    
+    --peer-type router:
+        Site-to-site router that routes traffic for LAN subnets.
+        Use with --router-subnet to specify LAN networks behind the router.
+        Server AllowedIPs will include both peer VPN IP and all LAN subnets.
+        No SNAT is used - pure L3 routing.
+        
+        Example:
+        ./another_betterthannothing_vpn.sh create --my-ip \\
+            --peer-type router \\
+            --router-subnet 192.168.2.0/24 \\
+            --router-subnet 192.168.3.0/24 \\
+            --mss-clamping
 
 UNDERSTANDING CIDR PARAMETERS:
 
@@ -1262,6 +1325,10 @@ parse_args() {
     OUTPUT_DIR="${DEFAULT_OUTPUT_DIR}"
     NON_INTERACTIVE=false
     REACH_SERVER=false
+    PEER_TYPE="host"
+    ROUTER_SUBNETS=()
+    CUSTOM_MTU=""
+    MSS_CLAMPING=false
 
     # Check if no arguments provided
     if [ $# -eq 0 ]; then
@@ -1324,6 +1391,26 @@ parse_args() {
                 REACH_SERVER=true
                 shift
                 ;;
+            --peer-type)
+                PEER_TYPE="$2"
+                if [ "$PEER_TYPE" != "host" ] && [ "$PEER_TYPE" != "router" ]; then
+                    echo "Error: --peer-type must be 'host' or 'router'" >&2
+                    exit 1
+                fi
+                shift 2
+                ;;
+            --router-subnet)
+                ROUTER_SUBNETS+=("$2")
+                shift 2
+                ;;
+            --mtu)
+                CUSTOM_MTU="$2"
+                shift 2
+                ;;
+            --mss-clamping)
+                MSS_CLAMPING=true
+                shift
+                ;;
             --yes|--non-interactive)
                 NON_INTERACTIVE=true
                 shift
@@ -1342,7 +1429,7 @@ parse_args() {
 
     # Export variables for use in command functions
     export COMMAND REGION STACK_NAME MODE USE_MY_IP VPC_CIDR INSTANCE_TYPE USE_SPOT ALLOCATE_EIP NUM_CLIENTS OUTPUT_DIR NON_INTERACTIVE REACH_SERVER
-    export ALLOWED_CIDRS
+    export ALLOWED_CIDRS PEER_TYPE ROUTER_SUBNETS CUSTOM_MTU MSS_CLAMPING
 }
 
 # Command: create
@@ -1727,6 +1814,12 @@ cmd_create() {
         local client_name="client-$i"
         local client_id=$((i + 1))  # Start from 10.99.0.2 (server is .1)
         
+        # Convert router subnets array to comma-separated string
+        local router_subnets_str=""
+        if [ ${#ROUTER_SUBNETS[@]} -gt 0 ]; then
+            router_subnets_str=$(IFS=','; echo "${ROUTER_SUBNETS[*]}")
+        fi
+        
         if generate_client_config \
             "$STACK_NAME" \
             "$client_name" \
@@ -1739,7 +1832,11 @@ cmd_create() {
             "$instance_id" \
             "$REGION" \
             "$OUTPUT_DIR" \
-            "$REACH_SERVER"; then
+            "$REACH_SERVER" \
+            "$PEER_TYPE" \
+            "$router_subnets_str" \
+            "${CUSTOM_MTU:-1360}" \
+            "$MSS_CLAMPING"; then
             client_count=$((client_count + 1))
         else
             echo "Warning: Failed to generate client config for $client_name" >&2
@@ -1750,11 +1847,22 @@ cmd_create() {
     
     # Create metadata.json file in output directory
     local metadata_file="$OUTPUT_DIR/$STACK_NAME/metadata.json"
+    
+    # Convert router subnets to JSON array
+    local router_subnets_json="[]"
+    if [ ${#ROUTER_SUBNETS[@]} -gt 0 ]; then
+        router_subnets_json=$(printf '%s\n' "${ROUTER_SUBNETS[@]}" | jq -R . | jq -s .)
+    fi
+    
     local metadata_json="{
   \"stack_name\": \"$STACK_NAME\",
   \"region\": \"$REGION\",
   \"mode\": \"$MODE\",
   \"reach_server\": $REACH_SERVER,
+  \"peer_type\": \"$PEER_TYPE\",
+  \"router_subnets\": $router_subnets_json,
+  \"mtu\": ${CUSTOM_MTU:-1360},
+  \"mss_clamping\": $MSS_CLAMPING,
   \"server_endpoint\": \"$public_ip:$vpn_port\",
   \"vpc_cidr\": \"$validated_vpc_cidr\",
   \"created_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
@@ -2659,6 +2767,38 @@ cmd_add_client() {
         reach_server=$(echo "$metadata" | jq -r '.reach_server // false')
     fi
     
+    # Extract peer_type from metadata (use command line flag if specified, otherwise from metadata)
+    local peer_type
+    if [ "$PEER_TYPE" != "host" ]; then
+        peer_type="$PEER_TYPE"
+    else
+        peer_type=$(echo "$metadata" | jq -r '.peer_type // "host"')
+    fi
+    
+    # Extract router_subnets from metadata (use command line if specified, otherwise from metadata)
+    local router_subnets_str=""
+    if [ ${#ROUTER_SUBNETS[@]} -gt 0 ]; then
+        router_subnets_str=$(IFS=','; echo "${ROUTER_SUBNETS[*]}")
+    else
+        router_subnets_str=$(echo "$metadata" | jq -r '.router_subnets // [] | join(",")')
+    fi
+    
+    # Extract MTU from metadata (use command line if specified, otherwise from metadata)
+    local custom_mtu
+    if [ -n "$CUSTOM_MTU" ]; then
+        custom_mtu="$CUSTOM_MTU"
+    else
+        custom_mtu=$(echo "$metadata" | jq -r '.mtu // 1360')
+    fi
+    
+    # Extract MSS clamping from metadata (use command line if specified, otherwise from metadata)
+    local mss_clamping
+    if [ "$MSS_CLAMPING" = "true" ]; then
+        mss_clamping="true"
+    else
+        mss_clamping=$(echo "$metadata" | jq -r '.mss_clamping // false')
+    fi
+    
     # Extract existing clients count to determine next client ID
     local existing_client_count
     existing_client_count=$(echo "$metadata" | jq -r '.clients | length')
@@ -2721,7 +2861,11 @@ cmd_add_client() {
         "$instance_id" \
         "$REGION" \
         "$OUTPUT_DIR" \
-        "$reach_server"; then
+        "$reach_server" \
+        "$peer_type" \
+        "$router_subnets_str" \
+        "$custom_mtu" \
+        "$mss_clamping"; then
         echo "" >&2
         echo "Error: Failed to generate client configuration" >&2
         exit 1

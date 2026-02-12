@@ -324,6 +324,10 @@ Create a new VPN stack with all infrastructure and configuration.
 - `--spot` - Use EC2 Spot instances for lower cost (can be interrupted)
 - `--eip` - Allocate an Elastic IP for persistent public IP address
 - `--reach-server` - Include VPN server subnet (10.99.0.0/24) in client AllowedIPs, allowing clients to reach services running on the VPN server itself (e.g., Docker containers)
+- `--peer-type <host|router>` - Peer type: `host` (default) for standard clients, `router` for site-to-site with LAN subnets
+- `--router-subnet <cidr>` - LAN subnet behind router peer (repeatable, only with `--peer-type router`)
+- `--mtu <value>` - Custom MTU value (default: 1360)
+- `--mss-clamping` - Enable MSS clamping for TCP connections (useful for router peers)
 - `--clients <n>` - Number of initial client configs to generate (default: 1)
 - `--output-dir <path>` - Output directory for client configs (default: ./another_betterthannothing_vpn_config)
 - `--yes` - Skip confirmation prompts
@@ -346,9 +350,7 @@ Create a new VPN stack with all infrastructure and configuration.
 ./another_betterthannothing_vpn.sh create --my-ip --vpc-cidr 172.16.0.0/16
 
 # Create VPN with Elastic IP (persistent IP address)
-./another_betterthannothing_vpn.sh create --my-ip --eip
-
-# Create VPN with access to server itself (for Docker containers, etc.)
+./another_betterthannothing_vpn.sh create --my-ip --eip# Create VPN with access to server itself (for Docker containers, etc.)
 ./another_betterthannothing_vpn.sh create --my-ip --reach-server
 ```
 
@@ -621,6 +623,94 @@ The system uses **two distinct CIDR parameters** with different purposes. Unders
 ./another_betterthannothing_vpn.sh create \
   --my-ip \                    # Access control: only my IP
   --vpc-cidr 172.16.0.0/16     # Internal network: custom range
+```
+
+## Router Peers (Site-to-Site VPN)
+
+### Overview
+
+Router peers allow you to connect entire LAN networks to your VPN, not just individual devices. This is useful for:
+- Connecting a home/office network to AWS VPC
+- Site-to-site VPN between locations
+- Routing traffic from IoT devices or servers behind a router
+
+### How It Works
+
+When you create a router peer:
+1. The peer's VPN IP AND all specified LAN subnets are added to server's AllowedIPs
+2. Traffic from LAN devices is routed through the VPN tunnel
+3. No SNAT is used - pure L3 routing (devices keep their original IPs)
+4. Optional MSS clamping prevents TCP fragmentation issues
+
+### Creating a Router Peer
+
+```bash
+# Create VPN with router peer for LAN 192.168.2.0/24
+./another_betterthannothing_vpn.sh create --my-ip \
+    --peer-type router \
+    --router-subnet 192.168.2.0/24 \
+    --mss-clamping
+
+# Multiple LAN subnets
+./another_betterthannothing_vpn.sh create --my-ip \
+    --peer-type router \
+    --router-subnet 192.168.2.0/24 \
+    --router-subnet 192.168.3.0/24 \
+    --router-subnet 10.0.0.0/24 \
+    --mss-clamping
+```
+
+### Router Configuration Example
+
+On your router (e.g., OpenWrt, pfSense, Linux router), the generated config will look like:
+
+```ini
+[Interface]
+PrivateKey = <router-private-key>
+Address = 10.99.0.2/32
+DNS = 1.1.1.1
+MTU = 1360
+PostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280
+PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280
+
+[Peer]
+PublicKey = <server-public-key>
+PresharedKey = <preshared-key>
+Endpoint = <server-ip>:51820
+AllowedIPs = 10.10.0.0/16
+PersistentKeepalive = 25
+```
+
+### Server-Side Configuration
+
+The server's `wg0.conf` will include the router subnets in AllowedIPs:
+
+```ini
+[Peer]
+PublicKey = <router-public-key>
+PresharedKey = <preshared-key>
+AllowedIPs = 10.99.0.2/32, 192.168.2.0/24, 192.168.3.0/24
+```
+
+### Router Setup Requirements
+
+On your router, you need to:
+
+1. **Enable IP forwarding** (usually already enabled on routers)
+2. **Add routes** for VPC CIDR pointing to WireGuard interface
+3. **Configure firewall** to allow forwarding between LAN and WireGuard
+
+Example for Linux router:
+```bash
+# Enable IP forwarding (if not already)
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
+# Add route to VPC via WireGuard
+ip route add 10.10.0.0/16 dev wg0
+
+# Allow forwarding (iptables)
+iptables -A FORWARD -i eth0 -o wg0 -j ACCEPT
+iptables -A FORWARD -i wg0 -o eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 ```
 
 ## Elastic IP (EIP) Support
