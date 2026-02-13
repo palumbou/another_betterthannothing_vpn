@@ -1030,14 +1030,19 @@ generate_client_config() {
     # For router: peer's VPN IP + all router subnets
     local server_allowed_ips="10.99.0.$client_id/32"
     if [ "$peer_type" = "router" ] && [ -n "$router_subnets" ]; then
-        # router_subnets is comma-separated, add each subnet
-        server_allowed_ips="$server_allowed_ips,$router_subnets"
+        # router_subnets is comma-separated, add space after commas for readability
+        local formatted_subnets
+        formatted_subnets=$(echo "$router_subnets" | sed 's/,/, /g')
+        server_allowed_ips="$server_allowed_ips, $formatted_subnets"
         echo "  Server AllowedIPs: $server_allowed_ips"
     fi
     
     # Create temp file for preshared key, set peer, then remove
+    # Note: wg set allowed-ips accepts comma-separated without spaces
+    local wg_allowed_ips
+    wg_allowed_ips=$(echo "$server_allowed_ips" | sed 's/, */,/g')
     if ! execute_remote_command "$instance_id" "$region" \
-        "echo '$preshared_key' | sudo tee /tmp/psk_$client_id.key > /dev/null && sudo wg set wg0 peer $client_public_key preshared-key /tmp/psk_$client_id.key allowed-ips $server_allowed_ips && sudo rm -f /tmp/psk_$client_id.key" 60; then
+        "echo '$preshared_key' | sudo tee /tmp/psk_$client_id.key > /dev/null && sudo wg set wg0 peer $client_public_key preshared-key /tmp/psk_$client_id.key allowed-ips $wg_allowed_ips && sudo rm -f /tmp/psk_$client_id.key" 60; then
         echo "" >&2
         echo "Error: Failed to add peer to server config for $client_name" >&2
         echo "" >&2
@@ -1045,6 +1050,23 @@ generate_client_config() {
         echo "  - Verify WireGuard service is running: sudo systemctl status wg-quick@wg0" >&2
         echo "  - Check WireGuard interface: sudo wg show" >&2
         return 1
+    fi
+    
+    # Step 3b: Add static routes for router subnets on server
+    if [ "$peer_type" = "router" ] && [ -n "$router_subnets" ]; then
+        echo "  Adding static routes for router subnets..."
+        # Split comma-separated subnets and add route for each
+        local subnet
+        for subnet in $(echo "$router_subnets" | tr ',' ' '); do
+            subnet=$(echo "$subnet" | xargs)  # trim whitespace
+            if [ -n "$subnet" ]; then
+                if ! execute_remote_command "$instance_id" "$region" \
+                    "sudo ip route add $subnet dev wg0 2>/dev/null || sudo ip route replace $subnet dev wg0" 60 >&2; then
+                    echo "  Warning: Failed to add route for $subnet" >&2
+                fi
+            fi
+        done
+        echo "  ✓ Static routes added"
     fi
     
     # Step 4: Save server config
@@ -1071,7 +1093,10 @@ generate_client_config() {
         
         # Add router subnets to AllowedIPs so clients can reach networks behind router peers
         if [ -n "$router_subnets" ]; then
-            allowed_ips="$allowed_ips, $router_subnets"
+            # Format with spaces after commas
+            local formatted_subnets
+            formatted_subnets=$(echo "$router_subnets" | sed 's/,/, /g')
+            allowed_ips="$allowed_ips, $formatted_subnets"
         fi
     fi
     
