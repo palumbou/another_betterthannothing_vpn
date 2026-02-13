@@ -619,7 +619,7 @@ The system uses **two distinct CIDR parameters** with different purposes. Unders
 
 ✅ **Correct usage:**
 ```bash
-# RIGHT - Separate concerns
+# RIGHT - Separation of Concerns
 ./another_betterthannothing_vpn.sh create \
   --my-ip \                    # Access control: only my IP
   --vpc-cidr 172.16.0.0/16     # Internal network: custom range
@@ -637,10 +637,24 @@ Router peers allow you to connect entire LAN networks to your VPN, not just indi
 ### How It Works
 
 When you create a router peer:
-1. The peer's VPN IP AND all specified LAN subnets are added to server's AllowedIPs
-2. Traffic from LAN devices is routed through the VPN tunnel
+1. **Server-side**: The peer's VPN IP AND all specified LAN subnets are added to server's AllowedIPs
+2. **Client-side**: All router subnets are added to client's AllowedIPs so traffic to those networks goes through the tunnel
 3. No SNAT is used - pure L3 routing (devices keep their original IPs)
 4. Optional MSS clamping prevents TCP fragmentation issues
+
+### Important Notes
+
+- `--peer-type router` applies to ALL clients created with that command
+- `--router-subnet` requires `--peer-type router` (error if used without it)
+- To create a mix of router and host peers, use separate commands:
+  ```bash
+  # First: create stack with router peer
+  ./another_betterthannothing_vpn.sh create --my-ip --peer-type router \
+      --router-subnet 192.168.0.0/24 --clients 1
+  
+  # Then: add host peer (without --peer-type router)
+  ./another_betterthannothing_vpn.sh add-client --name <stack-name>
+  ```
 
 ### Creating a Router Peer
 
@@ -677,7 +691,7 @@ PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMS
 PublicKey = <server-public-key>
 PresharedKey = <preshared-key>
 Endpoint = <server-ip>:51820
-AllowedIPs = 10.10.0.0/16
+AllowedIPs = 10.10.0.0/16, 192.168.0.0/24, 192.168.1.0/24
 PersistentKeepalive = 25
 ```
 

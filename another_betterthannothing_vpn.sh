@@ -1068,6 +1068,11 @@ generate_client_config() {
         else
             allowed_ips="$vpc_cidr"
         fi
+        
+        # Add router subnets to AllowedIPs so clients can reach networks behind router peers
+        if [ -n "$router_subnets" ]; then
+            allowed_ips="$allowed_ips, $router_subnets"
+        fi
     fi
     
     # Use custom MTU if provided, otherwise default to 1360
@@ -1430,6 +1435,20 @@ parse_args() {
     # Export variables for use in command functions
     export COMMAND REGION STACK_NAME MODE USE_MY_IP VPC_CIDR INSTANCE_TYPE USE_SPOT ALLOCATE_EIP NUM_CLIENTS OUTPUT_DIR NON_INTERACTIVE REACH_SERVER
     export ALLOWED_CIDRS PEER_TYPE ROUTER_SUBNETS CUSTOM_MTU MSS_CLAMPING
+    
+    # Validate: --router-subnet requires --peer-type router
+    if [ ${#ROUTER_SUBNETS[@]} -gt 0 ] && [ "$PEER_TYPE" != "router" ]; then
+        echo "Error: --router-subnet requires --peer-type router" >&2
+        echo "Example: ./another_betterthannothing_vpn.sh create --my-ip --peer-type router --router-subnet 192.168.2.0/24" >&2
+        exit 1
+    fi
+    
+    # Validate: --peer-type router should have at least one --router-subnet
+    if [ "$PEER_TYPE" = "router" ] && [ ${#ROUTER_SUBNETS[@]} -eq 0 ]; then
+        echo "Warning: --peer-type router specified without --router-subnet" >&2
+        echo "The router peer will only have its VPN IP in AllowedIPs (no LAN subnets)" >&2
+        echo ""
+    fi
 }
 
 # Command: create

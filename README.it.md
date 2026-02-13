@@ -626,7 +626,7 @@ Il sistema utilizza **due parametri CIDR distinti** con scopi diversi. Comprende
 
 ✅ **Utilizzo corretto:**
 ```bash
-# GIUSTO - Separare le preoccupazioni
+# GIUSTO - Separazione delle responsabilità
 ./another_betterthannothing_vpn.sh create \
   --my-ip \                    # Controllo accessi: solo il mio IP
   --vpc-cidr 172.16.0.0/16     # Rete interna: intervallo personalizzato
@@ -644,10 +644,24 @@ I router peer permettono di connettere intere reti LAN alla tua VPN, non solo si
 ### Come Funziona
 
 Quando crei un router peer:
-1. L'IP VPN del peer E tutte le subnet LAN specificate vengono aggiunte agli AllowedIPs del server
-2. Il traffico dai dispositivi LAN viene instradato attraverso il tunnel VPN
+1. **Lato server**: L'IP VPN del peer E tutte le subnet LAN specificate vengono aggiunte agli AllowedIPs del server
+2. **Lato client**: Tutte le subnet del router vengono aggiunte agli AllowedIPs del client così il traffico verso quelle reti passa nel tunnel
 3. Non viene usato SNAT - routing L3 puro (i dispositivi mantengono i loro IP originali)
 4. MSS clamping opzionale previene problemi di frammentazione TCP
+
+### Note Importanti
+
+- `--peer-type router` si applica a TUTTI i client creati con quel comando
+- `--router-subnet` richiede `--peer-type router` (errore se usato senza)
+- Per creare un mix di router e host peer, usa comandi separati:
+  ```bash
+  # Prima: crea stack con router peer
+  ./another_betterthannothing_vpn.sh create --my-ip --peer-type router \
+      --router-subnet 192.168.0.0/24 --clients 1
+  
+  # Poi: aggiungi host peer (senza --peer-type router)
+  ./another_betterthannothing_vpn.sh add-client --name <nome-stack>
+  ```
 
 ### Creare un Router Peer
 
@@ -684,7 +698,7 @@ PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMS
 PublicKey = <chiave-pubblica-server>
 PresharedKey = <chiave-preshared>
 Endpoint = <ip-server>:51820
-AllowedIPs = 10.10.0.0/16
+AllowedIPs = 10.10.0.0/16, 192.168.0.0/24, 192.168.1.0/24
 PersistentKeepalive = 25
 ```
 
