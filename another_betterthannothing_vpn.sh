@@ -722,11 +722,11 @@ bootstrap_vpn_server() {
     echo "" >&2
     
     # Step 1: Install wireguard-tools
-    echo "[1/7] Installing WireGuard tools..." >&2
+    echo "[1/7] Installing WireGuard tools and iptables..." >&2
     if ! execute_remote_command "$instance_id" "$region" \
-        "sudo dnf install -y wireguard-tools" 300 >&2; then
+        "sudo dnf install -y wireguard-tools iptables" 300 >&2; then
         echo "" >&2
-        echo "Error: Failed to install wireguard-tools" >&2
+        echo "Error: Failed to install wireguard-tools and iptables" >&2
         echo "" >&2
         echo "Possible causes:" >&2
         echo "  - Package repository is unavailable" >&2
@@ -738,7 +738,7 @@ bootstrap_vpn_server() {
         echo "  - Check system logs: sudo journalctl -xe" >&2
         return 1
     fi
-    echo "      ✓ WireGuard tools installed" >&2
+    echo "      ✓ WireGuard tools and iptables installed" >&2
     echo "" >&2
     
     # Step 2: Generate server WireGuard keys
