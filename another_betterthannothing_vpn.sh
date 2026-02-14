@@ -937,7 +937,7 @@ WGEOF"
 }
 
 # Generate client configuration
-# Parameters: stack_name, client_name, client_id, mode, vpc_cidr, endpoint, port, server_public_key, instance_id, region, output_dir, reach_server, peer_type, router_subnets, custom_mtu, mss_clamping
+# Parameters: stack_name, client_name, client_id, mode, vpc_cidr, endpoint, port, server_public_key, instance_id, region, output_dir, reach_server, peer_type, export_subnets, import_subnets, custom_mtu, mss_clamping, custom_mss, split_include_vpc, router_tunnel_mode
 generate_client_config() {
     local stack_name="$1"
     local client_name="$2"
@@ -952,15 +952,29 @@ generate_client_config() {
     local output_dir="${11}"
     local reach_server="${12:-false}"
     local peer_type="${13:-host}"
-    local router_subnets="${14:-}"
-    local custom_mtu="${15:-1360}"
-    local mss_clamping="${16:-false}"
+    local export_subnets="${14:-}"
+    local import_subnets="${15:-}"
+    local custom_mtu="${16:-1360}"
+    local mss_clamping="${17:-false}"
+    local custom_mss="${18:-}"
+    local split_include_vpc="${19:-true}"
+    local router_tunnel_mode="${20:-none}"
+    
+    debug_log "generate_client_config called with:"
+    debug_log "  peer_type=$peer_type"
+    debug_log "  export_subnets=$export_subnets"
+    debug_log "  import_subnets=$import_subnets"
+    debug_log "  split_include_vpc=$split_include_vpc"
+    debug_log "  router_tunnel_mode=$router_tunnel_mode"
     
     echo "Generating client configuration: $client_name (10.99.0.$client_id/32)..."
     if [ "$peer_type" = "router" ]; then
         echo "  Peer type: router"
-        if [ -n "$router_subnets" ]; then
-            echo "  Router subnets: $router_subnets"
+        if [ -n "$export_subnets" ]; then
+            echo "  Export subnets (LANs behind this router): $export_subnets"
+        fi
+        if [ -n "$import_subnets" ]; then
+            echo "  Import subnets (remote LANs to reach): $import_subnets"
         fi
     fi
     
@@ -1027,12 +1041,12 @@ generate_client_config() {
     
     # Build AllowedIPs for server-side peer config
     # For host: only the peer's VPN IP
-    # For router: peer's VPN IP + all router subnets
+    # For router: peer's VPN IP + all EXPORT subnets (LANs behind this router)
     local server_allowed_ips="10.99.0.$client_id/32"
-    if [ "$peer_type" = "router" ] && [ -n "$router_subnets" ]; then
-        # router_subnets is comma-separated, add space after commas for readability
+    if [ "$peer_type" = "router" ] && [ -n "$export_subnets" ]; then
+        # export_subnets is comma-separated, add space after commas for readability
         local formatted_subnets
-        formatted_subnets=$(echo "$router_subnets" | sed 's/,/, /g')
+        formatted_subnets=$(echo "$export_subnets" | sed 's/,/, /g')
         server_allowed_ips="$server_allowed_ips, $formatted_subnets"
         echo "  Server AllowedIPs: $server_allowed_ips"
     fi
@@ -1052,21 +1066,29 @@ generate_client_config() {
         return 1
     fi
     
-    # Step 3b: Add static routes for router subnets on server
-    if [ "$peer_type" = "router" ] && [ -n "$router_subnets" ]; then
-        echo "  Adding static routes for router subnets..."
+    # Step 3b: Add static routes and PostUp/PostDown for export subnets on server
+    if [ "$peer_type" = "router" ] && [ -n "$export_subnets" ]; then
+        echo "  Adding static routes for export subnets..."
         # Split comma-separated subnets and add route for each
         local subnet
-        for subnet in $(echo "$router_subnets" | tr ',' ' '); do
+        for subnet in $(echo "$export_subnets" | tr ',' ' '); do
             subnet=$(echo "$subnet" | xargs)  # trim whitespace
             if [ -n "$subnet" ]; then
+                # Add route immediately
                 if ! execute_remote_command "$instance_id" "$region" \
                     "sudo ip route add $subnet dev wg0 2>/dev/null || sudo ip route replace $subnet dev wg0" 60 >&2; then
                     echo "  Warning: Failed to add route for $subnet" >&2
                 fi
+                
+                # Add PostUp/PostDown to wg0.conf for persistence
+                debug_log "Adding PostUp/PostDown for $subnet"
+                execute_remote_command "$instance_id" "$region" \
+                    "grep -q 'ip route add $subnet dev wg0' /etc/wireguard/wg0.conf || sudo sed -i '/^\\[Interface\\]/a PostUp = ip route add $subnet dev wg0 || true' /etc/wireguard/wg0.conf" 60 >&2 || true
+                execute_remote_command "$instance_id" "$region" \
+                    "grep -q 'ip route del $subnet dev wg0' /etc/wireguard/wg0.conf || sudo sed -i '/^\\[Interface\\]/a PostDown = ip route del $subnet dev wg0 || true' /etc/wireguard/wg0.conf" 60 >&2 || true
             fi
         done
-        echo "  ✓ Static routes added"
+        echo "  ✓ Static routes added with PostUp/PostDown persistence"
     fi
     
     # Step 4: Save server config
@@ -1078,27 +1100,48 @@ generate_client_config() {
     fi
     
     # Step 5: Create client config file with [Interface] and [Peer] sections
-    # Set AllowedIPs based on mode and reach_server option
+    # Build AllowedIPs for client based on mode and peer type
     local allowed_ips
     if [ "$mode" = "full" ]; then
+        # Full tunnel mode: route all traffic through VPN
         allowed_ips="0.0.0.0/0, ::/0"
     else
-        # split-tunnel mode - only route VPC CIDR
-        if [ "$reach_server" = "true" ]; then
-            # Include VPN subnet to reach the server itself (e.g., for Docker containers)
-            allowed_ips="$vpc_cidr, 10.99.0.0/24"
-        else
+        # Split-tunnel mode: build AllowedIPs based on configuration
+        allowed_ips=""
+        
+        # Include VPC CIDR if split_include_vpc is true
+        if [ "$split_include_vpc" = "true" ]; then
             allowed_ips="$vpc_cidr"
         fi
         
-        # Add router subnets to AllowedIPs so clients can reach networks behind router peers
-        if [ -n "$router_subnets" ]; then
-            # Format with spaces after commas
-            local formatted_subnets
-            formatted_subnets=$(echo "$router_subnets" | sed 's/,/, /g')
-            allowed_ips="$allowed_ips, $formatted_subnets"
+        # Include VPN subnet if reach_server is true
+        if [ "$reach_server" = "true" ]; then
+            if [ -n "$allowed_ips" ]; then
+                allowed_ips="$allowed_ips, 10.99.0.0/24"
+            else
+                allowed_ips="10.99.0.0/24"
+            fi
+        fi
+        
+        # For router peers: add IMPORT subnets (NOT export subnets!)
+        # Import subnets are remote LANs this router wants to reach via VPN
+        if [ "$peer_type" = "router" ] && [ -n "$import_subnets" ]; then
+            local formatted_import
+            formatted_import=$(echo "$import_subnets" | sed 's/,/, /g')
+            if [ -n "$allowed_ips" ]; then
+                allowed_ips="$allowed_ips, $formatted_import"
+            else
+                allowed_ips="$formatted_import"
+            fi
+        fi
+        
+        # If allowed_ips is still empty, at least include VPC CIDR as fallback
+        if [ -z "$allowed_ips" ]; then
+            allowed_ips="$vpc_cidr"
         fi
     fi
+    
+    debug_log "Client AllowedIPs: $allowed_ips"
     
     # Use custom MTU if provided, otherwise default to 1360
     local mtu_value="${custom_mtu:-1360}"
@@ -1114,7 +1157,12 @@ MTU = $mtu_value"
 
     # Add PostUp/PostDown for MSS clamping if enabled (useful for router peers)
     if [ "$mss_clamping" = "true" ]; then
-        local mss_value=$((mtu_value - 80))  # MTU - 40 (IP header) - 40 (TCP header)
+        local mss_value
+        if [ -n "$custom_mss" ]; then
+            mss_value="$custom_mss"
+        else
+            mss_value=$((mtu_value - 80))  # MTU - 40 (IP header) - 40 (TCP header)
+        fi
         client_config="$client_config
 PostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $mss_value
 PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $mss_value"
@@ -1226,13 +1274,25 @@ OPTIONS:
     --peer-type <host|router>   Peer type (default: host)
                                   host: Standard VPN client
                                   router: Site-to-site router with LAN subnets
-    --router-subnet <cidr>      LAN subnet behind router peer (repeatable)
+    --export-subnet <cidr>      LAN subnet behind YOUR router to announce (repeatable)
                                 Only used with --peer-type router
-                                Example: --router-subnet 192.168.2.0/24
+                                These subnets are added to server AllowedIPs
+    --import-subnet <cidr>      Remote LAN subnet you want to REACH (repeatable)
+                                Only used with --peer-type router
+                                These subnets are added to client AllowedIPs
+    --router-tunnel <none|hub>  Router interconnection mode (default: none)
+                                  none: Routers only reach server/VPC
+                                  hub: Routers can reach each other's LANs
+    --split-include-vpc <bool>  Include VPC CIDR in split mode (default: true)
+                                Set to false for pure site-to-site routing
+    --auto-import-exported      Auto-import other routers' export subnets (hub mode)
     --mtu <value>               Custom MTU value (default: 1360)
                                 Lower values help with fragmentation issues
     --mss-clamping              Enable MSS clamping for TCP connections
                                 Useful for router peers to avoid fragmentation
+    --mss <value>               Custom MSS value (default: MTU - 80)
+                                Only used when --mss-clamping is enabled
+    --debug                     Enable debug output for troubleshooting
     --clients <n>               Number of initial clients (default: 1)
     --output-dir <path>         Output directory (default: ./another_betterthannothing_vpn_config)
     --yes, --non-interactive    Skip confirmations
@@ -1246,16 +1306,39 @@ PEER TYPES:
     
     --peer-type router:
         Site-to-site router that routes traffic for LAN subnets.
-        Use with --router-subnet to specify LAN networks behind the router.
-        Server AllowedIPs will include both peer VPN IP and all LAN subnets.
+        Use with --export-subnet to specify LANs behind YOUR router.
+        Use with --import-subnet to specify remote LANs you want to REACH.
+        Server AllowedIPs includes peer VPN IP + all export subnets.
+        Client AllowedIPs includes VPC + all import subnets (NOT exports).
         No SNAT is used - pure L3 routing.
+
+ROUTING MODES:
+
+    Export vs Import Subnets:
+        --export-subnet: LANs behind YOUR router (announced to server)
+                         These are added to server's AllowedIPs for this peer
+                         Traffic FROM these subnets will be accepted by server
         
-        Example:
-        ./another_betterthannothing_vpn.sh create --my-ip \\
-            --peer-type router \\
-            --router-subnet 192.168.2.0/24 \\
-            --router-subnet 192.168.3.0/24 \\
-            --mss-clamping
+        --import-subnet: Remote LANs you want to REACH via VPN
+                         These are added to YOUR client's AllowedIPs
+                         Traffic TO these subnets will go through the tunnel
+        
+        Example: Router A has LAN 192.168.1.0/24, wants to reach Router B's LAN 192.168.2.0/24
+        Router A config: --export-subnet 192.168.1.0/24 --import-subnet 192.168.2.0/24
+        Router B config: --export-subnet 192.168.2.0/24 --import-subnet 192.168.1.0/24
+    
+    Router Tunnel Modes (--router-tunnel):
+        none (default): Routers can only reach server/VPC, not each other's LANs
+                        Use this for simple site-to-VPC connectivity
+        
+        hub: Server acts as hub, routers can reach each other's exported LANs
+             Use --auto-import-exported to automatically add other routers' exports
+             to your import list
+
+    Split Include VPC (--split-include-vpc):
+        true (default): Include VPC CIDR in client AllowedIPs (split mode)
+        false: Exclude VPC CIDR - useful for pure site-to-site routing
+               where you only want to reach specific import subnets
 
 UNDERSTANDING CIDR PARAMETERS:
 
@@ -1312,6 +1395,27 @@ EXAMPLES:
     # Create VPN with access to server itself (for Docker, etc.)
     ./another_betterthannothing_vpn.sh create --my-ip --reach-server
 
+    # Site-to-site VPN: Router exporting LAN 192.168.1.0/24
+    ./another_betterthannothing_vpn.sh create --my-ip \\
+        --peer-type router \\
+        --export-subnet 192.168.1.0/24 \\
+        --mss-clamping
+
+    # Site-to-site VPN: Router exporting multiple LANs and importing remote LANs
+    ./another_betterthannothing_vpn.sh create --my-ip \\
+        --peer-type router \\
+        --export-subnet 192.168.1.0/24 \\
+        --export-subnet 192.168.2.0/24 \\
+        --import-subnet 10.0.0.0/24 \\
+        --mss-clamping
+
+    # Pure site-to-site (no VPC access, only reach import subnets)
+    ./another_betterthannothing_vpn.sh create --my-ip \\
+        --peer-type router \\
+        --export-subnet 192.168.1.0/24 \\
+        --import-subnet 192.168.2.0/24 \\
+        --split-include-vpc false
+
     # Stop VPN instance to save costs (keeps infrastructure)
     ./another_betterthannothing_vpn.sh stop --name my-vpn
 
@@ -1338,6 +1442,13 @@ For more information, see README.md
 EOF
 }
 
+# Debug logging function - only outputs when DEBUG_MODE is true
+debug_log() {
+    if [ "$DEBUG_MODE" = "true" ]; then
+        echo "DEBUG: $*" >&2
+    fi
+}
+
 # Parse command-line arguments
 parse_args() {
     # Initialize variables
@@ -1356,9 +1467,17 @@ parse_args() {
     NON_INTERACTIVE=false
     REACH_SERVER=false
     PEER_TYPE="host"
-    ROUTER_SUBNETS=()
     CUSTOM_MTU=""
     MSS_CLAMPING=false
+    CUSTOM_MSS=""
+    DEBUG_MODE=false
+    
+    # New export/import subnet model (replaces router_subnets)
+    EXPORT_SUBNETS=()
+    IMPORT_SUBNETS=()
+    ROUTER_TUNNEL_MODE="none"
+    SPLIT_INCLUDE_VPC=true
+    AUTO_IMPORT_EXPORTED=false
 
     # Check if no arguments provided
     if [ $# -eq 0 ]; then
@@ -1429,9 +1548,46 @@ parse_args() {
                 fi
                 shift 2
                 ;;
-            --router-subnet)
-                ROUTER_SUBNETS+=("$2")
+            --export-subnet)
+                # Validate CIDR format
+                if ! validate_cidr_format "$2"; then
+                    echo "Error: Invalid CIDR format for --export-subnet: '$2'. Expected format: x.x.x.x/y" >&2
+                    exit 1
+                fi
+                EXPORT_SUBNETS+=("$2")
                 shift 2
+                ;;
+            --import-subnet)
+                # Validate CIDR format
+                if ! validate_cidr_format "$2"; then
+                    echo "Error: Invalid CIDR format for --import-subnet: '$2'. Expected format: x.x.x.x/y" >&2
+                    exit 1
+                fi
+                IMPORT_SUBNETS+=("$2")
+                shift 2
+                ;;
+            --router-tunnel)
+                ROUTER_TUNNEL_MODE="$2"
+                if [ "$ROUTER_TUNNEL_MODE" != "none" ] && [ "$ROUTER_TUNNEL_MODE" != "hub" ]; then
+                    echo "Error: --router-tunnel must be 'none' or 'hub'. Got: '$ROUTER_TUNNEL_MODE'" >&2
+                    exit 1
+                fi
+                shift 2
+                ;;
+            --split-include-vpc)
+                if [ "$2" = "true" ]; then
+                    SPLIT_INCLUDE_VPC=true
+                elif [ "$2" = "false" ]; then
+                    SPLIT_INCLUDE_VPC=false
+                else
+                    echo "Error: --split-include-vpc must be 'true' or 'false'. Got: '$2'" >&2
+                    exit 1
+                fi
+                shift 2
+                ;;
+            --auto-import-exported)
+                AUTO_IMPORT_EXPORTED=true
+                shift
                 ;;
             --mtu)
                 CUSTOM_MTU="$2"
@@ -1439,6 +1595,14 @@ parse_args() {
                 ;;
             --mss-clamping)
                 MSS_CLAMPING=true
+                shift
+                ;;
+            --mss)
+                CUSTOM_MSS="$2"
+                shift 2
+                ;;
+            --debug)
+                DEBUG_MODE=true
                 shift
                 ;;
             --yes|--non-interactive)
@@ -1457,23 +1621,57 @@ parse_args() {
         esac
     done
 
+    # Convert arrays to comma-separated strings for passing to functions
+    EXPORT_SUBNETS_STR=""
+    if [ ${#EXPORT_SUBNETS[@]} -gt 0 ]; then
+        EXPORT_SUBNETS_STR=$(IFS=','; echo "${EXPORT_SUBNETS[*]}")
+    fi
+    
+    IMPORT_SUBNETS_STR=""
+    if [ ${#IMPORT_SUBNETS[@]} -gt 0 ]; then
+        IMPORT_SUBNETS_STR=$(IFS=','; echo "${IMPORT_SUBNETS[*]}")
+    fi
+    
     # Export variables for use in command functions
     export COMMAND REGION STACK_NAME MODE USE_MY_IP VPC_CIDR INSTANCE_TYPE USE_SPOT ALLOCATE_EIP NUM_CLIENTS OUTPUT_DIR NON_INTERACTIVE REACH_SERVER
-    export ALLOWED_CIDRS PEER_TYPE ROUTER_SUBNETS CUSTOM_MTU MSS_CLAMPING
+    export ALLOWED_CIDRS PEER_TYPE CUSTOM_MTU MSS_CLAMPING CUSTOM_MSS DEBUG_MODE
+    export EXPORT_SUBNETS_STR IMPORT_SUBNETS_STR ROUTER_TUNNEL_MODE SPLIT_INCLUDE_VPC AUTO_IMPORT_EXPORTED
     
-    # Validate: --router-subnet requires --peer-type router
-    if [ ${#ROUTER_SUBNETS[@]} -gt 0 ] && [ "$PEER_TYPE" != "router" ]; then
-        echo "Error: --router-subnet requires --peer-type router" >&2
-        echo "Example: ./another_betterthannothing_vpn.sh create --my-ip --peer-type router --router-subnet 192.168.2.0/24" >&2
+    # Validate: --export-subnet requires --peer-type router
+    if [ ${#EXPORT_SUBNETS[@]} -gt 0 ] && [ "$PEER_TYPE" != "router" ]; then
+        echo "Error: --export-subnet requires --peer-type router" >&2
+        echo "Example: ./another_betterthannothing_vpn.sh create --my-ip --peer-type router --export-subnet 192.168.2.0/24" >&2
         exit 1
     fi
     
-    # Validate: --peer-type router should have at least one --router-subnet
-    if [ "$PEER_TYPE" = "router" ] && [ ${#ROUTER_SUBNETS[@]} -eq 0 ]; then
-        echo "Warning: --peer-type router specified without --router-subnet" >&2
-        echo "The router peer will only have its VPN IP in AllowedIPs (no LAN subnets)" >&2
+    # Validate: --import-subnet requires --peer-type router
+    if [ ${#IMPORT_SUBNETS[@]} -gt 0 ] && [ "$PEER_TYPE" != "router" ]; then
+        echo "Error: --import-subnet requires --peer-type router" >&2
+        echo "Example: ./another_betterthannothing_vpn.sh create --my-ip --peer-type router --import-subnet 192.168.2.0/24" >&2
+        exit 1
+    fi
+    
+    # Validate: --peer-type router should have at least one --export-subnet
+    if [ "$PEER_TYPE" = "router" ] && [ ${#EXPORT_SUBNETS[@]} -eq 0 ]; then
+        echo "Warning: --peer-type router specified without --export-subnet" >&2
+        echo "The router peer will only have its VPN IP in AllowedIPs (no LAN subnets to export)" >&2
         echo ""
     fi
+    
+    # Warning: same subnet in both export and import
+    for export_sub in "${EXPORT_SUBNETS[@]}"; do
+        for import_sub in "${IMPORT_SUBNETS[@]}"; do
+            if [ "$export_sub" = "$import_sub" ]; then
+                echo "Warning: Subnet '$export_sub' is specified as both export and import. This may indicate a configuration error." >&2
+            fi
+        done
+    done
+    
+    debug_log "PEER_TYPE=$PEER_TYPE"
+    debug_log "EXPORT_SUBNETS_STR=$EXPORT_SUBNETS_STR"
+    debug_log "IMPORT_SUBNETS_STR=$IMPORT_SUBNETS_STR"
+    debug_log "ROUTER_TUNNEL_MODE=$ROUTER_TUNNEL_MODE"
+    debug_log "SPLIT_INCLUDE_VPC=$SPLIT_INCLUDE_VPC"
 }
 
 # Command: create
@@ -1849,6 +2047,12 @@ cmd_create() {
     
     echo "=== Generating Client Configurations ==="
     echo ""
+    debug_log "PEER_TYPE=$PEER_TYPE"
+    debug_log "EXPORT_SUBNETS_STR=$EXPORT_SUBNETS_STR"
+    debug_log "IMPORT_SUBNETS_STR=$IMPORT_SUBNETS_STR"
+    debug_log "ROUTER_TUNNEL_MODE=$ROUTER_TUNNEL_MODE"
+    debug_log "SPLIT_INCLUDE_VPC=$SPLIT_INCLUDE_VPC"
+    echo ""
     
     # Generate N client configs (from --clients parameter)
     local client_count=0
@@ -1858,11 +2062,7 @@ cmd_create() {
         local client_name="client-$i"
         local client_id=$((i + 1))  # Start from 10.99.0.2 (server is .1)
         
-        # Convert router subnets array to comma-separated string
-        local router_subnets_str=""
-        if [ ${#ROUTER_SUBNETS[@]} -gt 0 ]; then
-            router_subnets_str=$(IFS=','; echo "${ROUTER_SUBNETS[*]}")
-        fi
+        debug_log "Creating client $client_name with export_subnets=$EXPORT_SUBNETS_STR import_subnets=$IMPORT_SUBNETS_STR"
         
         if generate_client_config \
             "$STACK_NAME" \
@@ -1878,9 +2078,13 @@ cmd_create() {
             "$OUTPUT_DIR" \
             "$REACH_SERVER" \
             "$PEER_TYPE" \
-            "$router_subnets_str" \
+            "$EXPORT_SUBNETS_STR" \
+            "$IMPORT_SUBNETS_STR" \
             "${CUSTOM_MTU:-1360}" \
-            "$MSS_CLAMPING"; then
+            "$MSS_CLAMPING" \
+            "$CUSTOM_MSS" \
+            "$SPLIT_INCLUDE_VPC" \
+            "$ROUTER_TUNNEL_MODE"; then
             client_count=$((client_count + 1))
         else
             echo "Warning: Failed to generate client config for $client_name" >&2
@@ -1889,24 +2093,34 @@ cmd_create() {
         echo ""
     done
     
-    # Create metadata.json file in output directory
+    # Create metadata.json file in output directory (v2 format)
     local metadata_file="$OUTPUT_DIR/$STACK_NAME/metadata.json"
     
-    # Convert router subnets to JSON array
-    local router_subnets_json="[]"
-    if [ ${#ROUTER_SUBNETS[@]} -gt 0 ]; then
-        router_subnets_json=$(printf '%s\n' "${ROUTER_SUBNETS[@]}" | jq -R . | jq -s .)
+    # Convert export/import subnets strings to JSON arrays
+    local export_subnets_json="[]"
+    if [ -n "$EXPORT_SUBNETS_STR" ]; then
+        export_subnets_json=$(echo "$EXPORT_SUBNETS_STR" | tr ',' '\n' | jq -R . | jq -s .)
+    fi
+    
+    local import_subnets_json="[]"
+    if [ -n "$IMPORT_SUBNETS_STR" ]; then
+        import_subnets_json=$(echo "$IMPORT_SUBNETS_STR" | tr ',' '\n' | jq -R . | jq -s .)
     fi
     
     local metadata_json="{
+  \"metadata_version\": 2,
   \"stack_name\": \"$STACK_NAME\",
   \"region\": \"$REGION\",
   \"mode\": \"$MODE\",
   \"reach_server\": $REACH_SERVER,
+  \"split_include_vpc\": $SPLIT_INCLUDE_VPC,
+  \"router_tunnel_mode\": \"$ROUTER_TUNNEL_MODE\",
   \"peer_type\": \"$PEER_TYPE\",
-  \"router_subnets\": $router_subnets_json,
+  \"export_subnets\": $export_subnets_json,
+  \"import_subnets\": $import_subnets_json,
   \"mtu\": ${CUSTOM_MTU:-1360},
   \"mss_clamping\": $MSS_CLAMPING,
+  \"custom_mss\": ${CUSTOM_MSS:-null},
   \"server_endpoint\": \"$public_ip:$vpn_port\",
   \"vpc_cidr\": \"$validated_vpc_cidr\",
   \"created_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
@@ -2799,6 +3013,11 @@ cmd_add_client() {
         exit 1
     fi
     
+    # Check metadata version and handle migration
+    local metadata_version
+    metadata_version=$(echo "$metadata" | jq -r '.metadata_version // 1')
+    debug_log "Metadata version: $metadata_version"
+    
     # Extract mode from metadata
     local mode
     mode=$(echo "$metadata" | jq -r '.mode // "split"')
@@ -2819,12 +3038,43 @@ cmd_add_client() {
         peer_type=$(echo "$metadata" | jq -r '.peer_type // "host"')
     fi
     
-    # Extract router_subnets from metadata (use command line if specified, otherwise from metadata)
-    local router_subnets_str=""
-    if [ ${#ROUTER_SUBNETS[@]} -gt 0 ]; then
-        router_subnets_str=$(IFS=','; echo "${ROUTER_SUBNETS[*]}")
+    # Extract export_subnets from metadata (use command line if specified, otherwise from metadata)
+    # Handle migration from v1 (router_subnets -> export_subnets)
+    local export_subnets_str=""
+    if [ ${#EXPORT_SUBNETS[@]} -gt 0 ]; then
+        export_subnets_str=$(IFS=','; echo "${EXPORT_SUBNETS[*]}")
     else
-        router_subnets_str=$(echo "$metadata" | jq -r '.router_subnets // [] | join(",")')
+        if [ "$metadata_version" -eq 1 ]; then
+            # Migrate from router_subnets
+            export_subnets_str=$(echo "$metadata" | jq -r '.router_subnets // [] | join(",")')
+            debug_log "Migrated router_subnets to export_subnets: $export_subnets_str"
+        else
+            export_subnets_str=$(echo "$metadata" | jq -r '.export_subnets // [] | join(",")')
+        fi
+    fi
+    
+    # Extract import_subnets from metadata (use command line if specified, otherwise from metadata)
+    local import_subnets_str=""
+    if [ ${#IMPORT_SUBNETS[@]} -gt 0 ]; then
+        import_subnets_str=$(IFS=','; echo "${IMPORT_SUBNETS[*]}")
+    else
+        import_subnets_str=$(echo "$metadata" | jq -r '.import_subnets // [] | join(",")')
+    fi
+    
+    # Extract router_tunnel_mode from metadata
+    local router_tunnel_mode
+    if [ "$ROUTER_TUNNEL_MODE" != "none" ]; then
+        router_tunnel_mode="$ROUTER_TUNNEL_MODE"
+    else
+        router_tunnel_mode=$(echo "$metadata" | jq -r '.router_tunnel_mode // "none"')
+    fi
+    
+    # Extract split_include_vpc from metadata
+    local split_include_vpc
+    if [ "$SPLIT_INCLUDE_VPC" = "false" ]; then
+        split_include_vpc="false"
+    else
+        split_include_vpc=$(echo "$metadata" | jq -r '.split_include_vpc // true')
     fi
     
     # Extract MTU from metadata (use command line if specified, otherwise from metadata)
@@ -2841,6 +3091,14 @@ cmd_add_client() {
         mss_clamping="true"
     else
         mss_clamping=$(echo "$metadata" | jq -r '.mss_clamping // false')
+    fi
+    
+    # Extract custom MSS from metadata
+    local custom_mss
+    if [ -n "$CUSTOM_MSS" ]; then
+        custom_mss="$CUSTOM_MSS"
+    else
+        custom_mss=$(echo "$metadata" | jq -r '.custom_mss // empty')
     fi
     
     # Extract existing clients count to determine next client ID
@@ -2907,9 +3165,13 @@ cmd_add_client() {
         "$OUTPUT_DIR" \
         "$reach_server" \
         "$peer_type" \
-        "$router_subnets_str" \
+        "$export_subnets_str" \
+        "$import_subnets_str" \
         "$custom_mtu" \
-        "$mss_clamping"; then
+        "$mss_clamping" \
+        "$custom_mss" \
+        "$split_include_vpc" \
+        "$router_tunnel_mode"; then
         echo "" >&2
         echo "Error: Failed to generate client configuration" >&2
         exit 1

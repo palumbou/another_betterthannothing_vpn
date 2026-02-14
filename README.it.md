@@ -328,9 +328,15 @@ Crea un nuovo stack VPN con tutta l'infrastruttura e la configurazione.
 - `--eip` - Alloca un Elastic IP per un indirizzo IP pubblico persistente
 - `--reach-server` - Include la subnet del server VPN (10.99.0.0/24) negli AllowedIPs del client, permettendo ai client di raggiungere servizi in esecuzione sul server VPN stesso (es. container Docker)
 - `--peer-type <host|router>` - Tipo di peer: `host` (predefinito) per client standard, `router` per site-to-site con subnet LAN
-- `--router-subnet <cidr>` - Subnet LAN dietro il router peer (ripetibile, solo con `--peer-type router`)
+- `--export-subnet <cidr>` - Subnet LAN dietro il TUO router da annunciare (ripetibile, solo con `--peer-type router`). Aggiunta agli AllowedIPs del server.
+- `--import-subnet <cidr>` - Subnet LAN remota che vuoi RAGGIUNGERE (ripetibile, solo con `--peer-type router`). Aggiunta agli AllowedIPs del client.
+- `--router-tunnel <none|hub>` - Modalità interconnessione router (predefinito: none). `hub` permette ai router di raggiungere le LAN degli altri.
+- `--split-include-vpc <true|false>` - Include CIDR VPC negli AllowedIPs in modalità split (predefinito: true). Imposta a false per site-to-site puro.
+- `--auto-import-exported` - Auto-importa le export subnet degli altri router (solo modalità hub)
 - `--mtu <valore>` - Valore MTU personalizzato (predefinito: 1360)
 - `--mss-clamping` - Abilita MSS clamping per connessioni TCP (utile per router peer)
+- `--mss <valore>` - Valore MSS personalizzato (predefinito: MTU - 80). Usato solo con --mss-clamping.
+- `--debug` - Abilita output di debug per troubleshooting
 - `--clients <n>` - Numero di configurazioni client iniziali da generare (predefinito: 1)
 - `--output-dir <percorso>` - Directory di output per le configurazioni client (predefinito: ./another_betterthannothing_vpn_config)
 - `--yes` - Salta i prompt di conferma
@@ -357,6 +363,13 @@ Crea un nuovo stack VPN con tutta l'infrastruttura e la configurazione.
 
 # Crea VPN con accesso al server stesso (per container Docker, ecc.)
 ./another_betterthannothing_vpn.sh create --my-ip --reach-server
+
+# VPN Site-to-site: Router che esporta LAN e importa LAN remota
+./another_betterthannothing_vpn.sh create --my-ip \
+    --peer-type router \
+    --export-subnet 192.168.1.0/24 \
+    --import-subnet 192.168.2.0/24 \
+    --mss-clamping
 ```
 
 #### `delete`
@@ -641,23 +654,34 @@ I router peer permettono di connettere intere reti LAN alla tua VPN, non solo si
 - VPN site-to-site tra diverse sedi
 - Instradare traffico da dispositivi IoT o server dietro un router
 
+### Export vs Import Subnet
+
+Il concetto chiave per i router peer è la distinzione tra subnet **export** e **import**:
+
+- **Export subnet** (`--export-subnet`): LAN dietro il TUO router che vuoi annunciare al server VPN. Queste vengono aggiunte agli AllowedIPs del server per il tuo peer, permettendo al traffico DA queste subnet di essere accettato.
+
+- **Import subnet** (`--import-subnet`): LAN remote che vuoi RAGGIUNGERE tramite il tunnel VPN. Queste vengono aggiunte agli AllowedIPs del TUO client, così il traffico VERSO queste subnet passa nel tunnel.
+
+**Importante**: Le export subnet NON vengono aggiunte agli AllowedIPs del tuo client. Questo previene loop di routing dove il traffico della tua LAN verrebbe inviato nel tunnel.
+
 ### Come Funziona
 
 Quando crei un router peer:
-1. **Lato server**: L'IP VPN del peer E tutte le subnet LAN specificate vengono aggiunte agli AllowedIPs del server
-2. **Lato client**: Tutte le subnet del router vengono aggiunte agli AllowedIPs del client così il traffico verso quelle reti passa nel tunnel
-3. Non viene usato SNAT - routing L3 puro (i dispositivi mantengono i loro IP originali)
-4. MSS clamping opzionale previene problemi di frammentazione TCP
+1. **Lato server**: L'IP VPN del peer E tutte le subnet **export** vengono aggiunte agli AllowedIPs del server
+2. **Lato server**: Comandi PostUp/PostDown vengono aggiunti per route persistenti verso le export subnet
+3. **Lato client**: Il CIDR VPC (opzionale) e le subnet **import** vengono aggiunte agli AllowedIPs del client
+4. Non viene usato SNAT - routing L3 puro (i dispositivi mantengono i loro IP originali)
+5. MSS clamping opzionale previene problemi di frammentazione TCP
 
 ### Note Importanti
 
 - `--peer-type router` si applica a TUTTI i client creati con quel comando
-- `--router-subnet` richiede `--peer-type router` (errore se usato senza)
+- `--export-subnet` e `--import-subnet` richiedono `--peer-type router`
 - Per creare un mix di router e host peer, usa comandi separati:
   ```bash
   # Prima: crea stack con router peer
   ./another_betterthannothing_vpn.sh create --my-ip --peer-type router \
-      --router-subnet 192.168.0.0/24 --clients 1
+      --export-subnet 192.168.0.0/24 --clients 1
   
   # Poi: aggiungi host peer (senza --peer-type router)
   ./another_betterthannothing_vpn.sh add-client --name <nome-stack>
@@ -666,20 +690,43 @@ Quando crei un router peer:
 ### Creare un Router Peer
 
 ```bash
-# Crea VPN con router peer per LAN 192.168.0.0/24
+# Crea VPN con router peer che esporta LAN 192.168.0.0/24
 ./another_betterthannothing_vpn.sh create --my-ip \
     --peer-type router \
-    --router-subnet 192.168.0.0/24 \
+    --export-subnet 192.168.0.0/24 \
     --mss-clamping
 
-# Subnet LAN multiple
+# Export subnet multiple (LAN dietro il tuo router)
 ./another_betterthannothing_vpn.sh create --my-ip \
     --peer-type router \
-    --router-subnet 192.168.0.0/24 \
-    --router-subnet 192.168.1.0/24 \
-    --router-subnet 10.0.0.0/24 \
+    --export-subnet 192.168.0.0/24 \
+    --export-subnet 192.168.1.0/24 \
+    --mss-clamping
+
+# Esporta le tue LAN E importa LAN remote che vuoi raggiungere
+./another_betterthannothing_vpn.sh create --my-ip \
+    --peer-type router \
+    --export-subnet 192.168.1.0/24 \
+    --import-subnet 192.168.2.0/24 \
+    --import-subnet 10.0.0.0/24 \
+    --mss-clamping
+
+# Site-to-site puro (nessun accesso VPC, solo raggiungere import subnet)
+./another_betterthannothing_vpn.sh create --my-ip \
+    --peer-type router \
+    --export-subnet 192.168.1.0/24 \
+    --import-subnet 192.168.2.0/24 \
+    --split-include-vpc false \
     --mss-clamping
 ```
+
+### Modalità Router Tunnel
+
+L'opzione `--router-tunnel` controlla come i router peer interagiscono tra loro:
+
+- **none** (default): I router possono raggiungere solo il server/VPC, non le LAN degli altri router. Usa questo per semplice connettività site-to-VPC.
+
+- **hub**: Il server agisce come hub dove i router possono raggiungere le LAN esportate dagli altri. Usa `--auto-import-exported` per aggiungere automaticamente le export subnet degli altri router alla tua lista import.
 
 ### Esempio Configurazione Router
 
@@ -698,19 +745,29 @@ PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMS
 PublicKey = <chiave-pubblica-server>
 PresharedKey = <chiave-preshared>
 Endpoint = <ip-server>:51820
-AllowedIPs = 10.10.0.0/16, 192.168.0.0/24, 192.168.1.0/24
+AllowedIPs = 10.10.0.0/16, 192.168.2.0/24
 PersistentKeepalive = 25
 ```
 
+Nota: Gli AllowedIPs del client includono il CIDR VPC e le subnet **import**, NON le export subnet (192.168.1.0/24 in questo esempio).
+
 ### Configurazione Lato Server
 
-Il `wg0.conf` del server includerà le subnet del router negli AllowedIPs:
+Il `wg0.conf` del server includerà le subnet **export** negli AllowedIPs e PostUp/PostDown per la persistenza delle route:
 
 ```ini
+[Interface]
+Address = 10.99.0.1/24
+MTU = 1360
+ListenPort = 51820
+PrivateKey = <chiave-privata-server>
+PostUp = ip route add 192.168.1.0/24 dev wg0 || true
+PostDown = ip route del 192.168.1.0/24 dev wg0 || true
+
 [Peer]
 PublicKey = <chiave-pubblica-router>
 PresharedKey = <chiave-preshared>
-AllowedIPs = 10.99.0.2/32, 192.168.0.0/24, 192.168.1.0/24
+AllowedIPs = 10.99.0.2/32, 192.168.1.0/24
 ```
 
 ### Requisiti Setup Router
@@ -718,7 +775,7 @@ AllowedIPs = 10.99.0.2/32, 192.168.0.0/24, 192.168.1.0/24
 Sul tuo router, devi:
 
 1. **Abilitare IP forwarding** (solitamente già abilitato sui router)
-2. **Aggiungere route** per il CIDR VPC che puntano all'interfaccia WireGuard
+2. **Aggiungere route** per il CIDR VPC e le import subnet che puntano all'interfaccia WireGuard
 3. **Configurare firewall** per permettere il forwarding tra LAN e WireGuard
 
 Esempio per router Linux:
@@ -728,6 +785,9 @@ echo 1 > /proc/sys/net/ipv4/ip_forward
 
 # Aggiungi route verso VPC via WireGuard
 ip route add 10.10.0.0/16 dev wg0
+
+# Aggiungi route verso import subnet (LAN remote)
+ip route add 192.168.2.0/24 dev wg0
 
 # Permetti forwarding (iptables)
 iptables -A FORWARD -i eth0 -o wg0 -j ACCEPT
