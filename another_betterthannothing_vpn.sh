@@ -1151,8 +1151,17 @@ generate_client_config() {
     # The private key is never logged to stdout/stderr - it only appears in the .conf file
     local client_config="[Interface]
 PrivateKey = $client_private_key
-Address = 10.99.0.$client_id/32
-DNS = 1.1.1.1
+Address = 10.99.0.$client_id/32"
+
+    # Add DNS only in full-tunnel mode
+    # In split-tunnel mode, DNS queries would not go through the tunnel (1.1.1.1 not in AllowedIPs)
+    # so we let the client use its existing DNS configuration
+    if [ "$mode" = "full" ]; then
+        client_config="$client_config
+DNS = 1.1.1.1"
+    fi
+
+    client_config="$client_config
 MTU = $mtu_value"
 
     # Add PostUp/PostDown for MSS clamping if enabled (useful for router peers)
