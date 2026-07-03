@@ -334,26 +334,43 @@ validate_vpc_cidr() {
 }
 
 # Detect CPU architecture from instance type
-# Returns 'arm64' for Graviton instances (t4g, m6g, c6g, etc.)
-# Returns 'x86_64' for Intel/AMD instances (t3, m5, c5, etc.)
+# Queries the EC2 API so new instance families are always recognized;
+# falls back to a naming heuristic if the API is unavailable.
+# Returns 'arm64' for Graviton instances, 'x86_64' for Intel/AMD instances
 detect_instance_architecture() {
     local instance_type="$1"
-    
-    # Extract instance family (e.g., t4g from t4g.nano)
-    local instance_family
-    instance_family=$(echo "$instance_type" | cut -d'.' -f1)
-    
-    # ARM64 (Graviton) instance families end with 'g' and have specific patterns
-    # t4g, m6g, m6gd, c6g, c6gd, r6g, r6gd, x2gd, etc.
-    # Also includes a1 instances
-    case "$instance_family" in
-        t4g|m6g|m6gd|m7g|m7gd|c6g|c6gd|c7g|c7gd|r6g|r6gd|r7g|r7gd|x2gd|im4gn|is4gen|i4g|hpc7g|a1)
+    local region="${2:-${REGION}}"
+
+    # Authoritative source: EC2 API (also catches typos in the instance type)
+    local api_arch
+    api_arch=$(aws ec2 describe-instance-types \
+        --instance-types "$instance_type" \
+        --region "$region" \
+        --query 'InstanceTypes[0].ProcessorInfo.SupportedArchitectures[0]' \
+        --output text 2>/dev/null || echo "")
+
+    case "$api_arch" in
+        arm64|arm64_mac)
             echo "arm64"
+            return 0
             ;;
-        *)
+        x86_64|x86_64_mac|i386)
             echo "x86_64"
+            return 0
             ;;
     esac
+
+    echo "Warning: Could not determine architecture for '$instance_type' via EC2 API, using naming heuristic" >&2
+
+    # Fallback heuristic: Graviton families look like t4g, c8g, m7gd, im4gn, c7gn, a1
+    local instance_family
+    instance_family=$(echo "$instance_type" | cut -d'.' -f1)
+
+    if [[ "$instance_family" =~ ^[a-z]+[0-9]+g[a-z]*$ ]] || [ "$instance_family" = "a1" ]; then
+        echo "arm64"
+    else
+        echo "x86_64"
+    fi
 }
 
 # Detect operator's public IP address
@@ -463,16 +480,19 @@ get_stack_outputs() {
     echo "$outputs"
 }
 
-# Get instance ID from stack (handles both on-demand and spot fleet)
-# Parameters: stack_name, region
+# Get instance ID from stack (handles both current stacks and legacy spot fleet stacks)
+# Parameters: stack_name, region, [stack_outputs_json]
+# Pass pre-fetched stack outputs as third argument to avoid a redundant describe-stacks call
 # Returns: instance_id or empty string
 get_instance_id_from_stack() {
     local stack_name="$1"
     local region="$2"
-    
-    # Get stack outputs
-    local stack_outputs
-    stack_outputs=$(get_stack_outputs "$stack_name" "$region")
+
+    # Use pre-fetched stack outputs if provided, otherwise fetch them
+    local stack_outputs="${3:-}"
+    if [ -z "$stack_outputs" ]; then
+        stack_outputs=$(get_stack_outputs "$stack_name" "$region")
+    fi
     
     # First try to get InstanceId directly (on-demand case)
     local instance_id
@@ -500,26 +520,29 @@ get_instance_id_from_stack() {
     echo "$instance_id"
 }
 
-# Get public IP from stack (handles both on-demand and spot fleet)
-# Parameters: stack_name, region
+# Get public IP from stack (handles both current stacks and legacy spot fleet stacks)
+# Parameters: stack_name, region, [stack_outputs_json]
+# Pass pre-fetched stack outputs as third argument to avoid a redundant describe-stacks call
 # Returns: public_ip or empty string
 get_public_ip_from_stack() {
     local stack_name="$1"
     local region="$2"
-    
-    # Get stack outputs
-    local stack_outputs
-    stack_outputs=$(get_stack_outputs "$stack_name" "$region")
-    
+
+    # Use pre-fetched stack outputs if provided, otherwise fetch them
+    local stack_outputs="${3:-}"
+    if [ -z "$stack_outputs" ]; then
+        stack_outputs=$(get_stack_outputs "$stack_name" "$region")
+    fi
+
     # First try to get PublicIp directly (on-demand case)
     local public_ip
     public_ip=$(echo "$stack_outputs" | jq -r '.PublicIp // empty')
-    
+
     # If public_ip is "spot-fleet-managed" or empty, try to get from instance
     if [ -z "$public_ip" ] || [ "$public_ip" = "spot-fleet-managed" ]; then
         # Get instance ID
         local instance_id
-        instance_id=$(get_instance_id_from_stack "$stack_name" "$region")
+        instance_id=$(get_instance_id_from_stack "$stack_name" "$region" "$stack_outputs")
         
         if [ -n "$instance_id" ]; then
             # Get public IP from instance
@@ -620,14 +643,19 @@ execute_remote_command() {
     local region="$2"
     local command="$3"
     local timeout="${4:-60}"  # Default 60 second timeout
-    
+
+    # Build the parameters payload as real JSON so quotes, commas and
+    # newlines in the command cannot break the CLI shorthand parsing
+    local params_json
+    params_json=$(jq -cn --arg cmd "$command" '{commands: [$cmd]}')
+
     # Use SSM Send-Command API for non-interactive commands
     local command_id
     local send_output
     if ! send_output=$(aws ssm send-command \
         --instance-ids "$instance_id" \
         --document-name "AWS-RunShellScript" \
-        --parameters "commands=[\"$command\"]" \
+        --parameters "$params_json" \
         --timeout-seconds "$timeout" \
         --region "$region" \
         --output json 2>&1); then
@@ -650,7 +678,10 @@ execute_remote_command() {
     fi
     
     # Wait for command to complete (poll every 2 seconds)
-    local max_wait=30  # 30 attempts * 2 seconds = 60 seconds
+    # Derive the polling budget from the requested timeout, with a small
+    # buffer for SSM scheduling latency, so long-running commands (e.g. dnf
+    # install with --timeout-seconds 300) are not falsely reported as failed
+    local max_wait=$(( timeout / 2 + 15 ))
     local attempt=0
     local status=""
     
@@ -716,6 +747,7 @@ bootstrap_vpn_server() {
     local mode="$3"
     local vpn_port="$4"
     local vpc_cidr="$5"
+    local router_tunnel_mode="${6:-none}"
     
     echo "" >&2
     echo "=== Bootstrapping VPN Server ===" >&2
@@ -742,64 +774,37 @@ bootstrap_vpn_server() {
     echo "" >&2
     
     # Step 2: Generate server WireGuard keys
+    # Keys are generated on the instance with a restrictive umask and the
+    # private key never leaves the server: only the public key is returned
+    # (SSM command output is retained by AWS, so it must not contain secrets)
     echo "[2/7] Generating server WireGuard keys..." >&2
-    local server_private_key
-    if ! server_private_key=$(execute_remote_command "$instance_id" "$region" \
-        "wg genkey | sudo tee /etc/wireguard/server_private.key" 60); then
+    local server_public_key
+    if ! server_public_key=$(execute_remote_command "$instance_id" "$region" \
+        "sudo bash -c 'umask 077; wg genkey > /etc/wireguard/server_private.key; wg pubkey < /etc/wireguard/server_private.key > /etc/wireguard/server_public.key; cat /etc/wireguard/server_public.key'" 60); then
         echo "" >&2
-        echo "Error: Failed to generate server private key" >&2
+        echo "Error: Failed to generate server keys" >&2
         echo "" >&2
         echo "This may indicate WireGuard tools were not installed correctly." >&2
         echo "Try connecting via SSM to troubleshoot: ./another_betterthannothing_vpn.sh ssm --name \$STACK_NAME" >&2
         return 1
     fi
-    
-    # Remove any trailing whitespace/newlines and ensure key is not logged
-    server_private_key=$(echo "$server_private_key" | tr -d '\n\r' | xargs)
-    
-    # Validate key format (should be base64, 44 characters)
-    if [ ${#server_private_key} -ne 44 ]; then
-        echo "" >&2
-        echo "Error: Generated private key has unexpected format (length: ${#server_private_key}, expected: 44)" >&2
-        return 1
-    fi
-    
-    # Generate and retrieve server public key
-    local server_public_key
-    if ! server_public_key=$(execute_remote_command "$instance_id" "$region" \
-        "sudo cat /etc/wireguard/server_private.key | wg pubkey | sudo tee /etc/wireguard/server_public.key" 60); then
-        echo "" >&2
-        echo "Error: Failed to generate server public key" >&2
-        return 1
-    fi
-    
+
     # Remove any trailing whitespace/newlines
     server_public_key=$(echo "$server_public_key" | tr -d '\n\r' | xargs)
-    
-    # Validate public key format
+
+    # Validate public key format (should be base64, 44 characters)
     if [ ${#server_public_key} -ne 44 ]; then
         echo "" >&2
         echo "Error: Generated public key has unexpected format (length: ${#server_public_key}, expected: 44)" >&2
         return 1
     fi
-    
-    echo "      ✓ Server keys generated" >&2
+
+    echo "      ✓ Server keys generated (private key never leaves the server)" >&2
     echo "      Public key: $server_public_key" >&2
     echo "" >&2
-    
-    # Step 3: Set proper permissions on key files
-    echo "[3/7] Setting key file permissions..." >&2
-    if ! execute_remote_command "$instance_id" "$region" \
-        "sudo chmod 600 /etc/wireguard/server_private.key /etc/wireguard/server_public.key" 60 >&2; then
-        echo "" >&2
-        echo "Error: Failed to set key file permissions" >&2
-        return 1
-    fi
-    echo "      ✓ Key file permissions set (600)" >&2
-    echo "" >&2
-    
-    # Step 4: Create WireGuard configuration file
-    echo "[4/7] Creating WireGuard configuration..." >&2
+
+    # Step 3: Create WireGuard configuration file
+    echo "[3/7] Creating WireGuard configuration..." >&2
     
     # Detect the primary network interface (not eth0 on all instance types)
     local primary_interface
@@ -820,12 +825,15 @@ bootstrap_vpn_server() {
     fi
     
     # Build the configuration file content
+    # The private key is NOT embedded here: the config is written with a
+    # placeholder and the key is injected on the server itself, so the key
+    # never appears in SSM command content (which AWS retains and logs)
     local wg_config="[Interface]
 Address = 10.99.0.1/24
 ListenPort = $vpn_port
-PrivateKey = $server_private_key
+PrivateKey = __SERVER_PRIVATE_KEY__
 MTU = 1360"
-    
+
     # Add PostUp/PostDown iptables rules if mode is full-tunnel
     if [ "$mode" = "full" ]; then
         wg_config="$wg_config
@@ -835,32 +843,47 @@ PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING 
     else
         echo "      Mode: Split-tunnel (no NAT)" >&2
     fi
-    
-    # Write configuration file
-    # Use heredoc to handle multi-line content safely
+
+    # In hub mode, allow forwarding between VPN peers so routers can reach
+    # each other's exported LANs through the server
+    if [ "$router_tunnel_mode" = "hub" ]; then
+        wg_config="$wg_config
+PostUp = iptables -A FORWARD -i wg0 -o wg0 -j ACCEPT
+PostDown = iptables -D FORWARD -i wg0 -o wg0 -j ACCEPT"
+        echo "      Router tunnel mode: hub (peer-to-peer forwarding enabled)" >&2
+    fi
+
+    # Write configuration file (chmod in the same round trip so the file is
+    # never left with default permissions), then inject the private key on
+    # the server side
     local create_config_cmd="sudo tee /etc/wireguard/wg0.conf > /dev/null << 'WGEOF'
 $wg_config
 
 # Peers will be added dynamically
-WGEOF"
-    
+WGEOF
+sudo chmod 600 /etc/wireguard/wg0.conf"
+
     if ! execute_remote_command "$instance_id" "$region" "$create_config_cmd" 60 >&2; then
         echo "" >&2
         echo "Error: Failed to create WireGuard configuration file" >&2
         return 1
     fi
-    
-    # Set proper permissions on config file
-    if ! execute_remote_command "$instance_id" "$region" \
-        "sudo chmod 600 /etc/wireguard/wg0.conf" 60 >&2; then
-        echo "" >&2
-        echo "Error: Failed to set config file permissions" >&2
-        return 1
-    fi
-    
+
     echo "      ✓ WireGuard configuration created" >&2
     echo "" >&2
-    
+
+    # Step 4: Inject the server private key into the config on the server
+    # The command substitution is escaped so it runs on the instance
+    echo "[4/7] Injecting server private key (server-side only)..." >&2
+    if ! execute_remote_command "$instance_id" "$region" \
+        'sudo sed -i "s|__SERVER_PRIVATE_KEY__|$(sudo cat /etc/wireguard/server_private.key)|" /etc/wireguard/wg0.conf' 60 >&2; then
+        echo "" >&2
+        echo "Error: Failed to inject server private key into configuration" >&2
+        return 1
+    fi
+    echo "      ✓ Private key injected" >&2
+    echo "" >&2
+
     # Step 5: Enable IP forwarding
     echo "[5/7] Enabling IP forwarding..." >&2
     
@@ -978,57 +1001,72 @@ generate_client_config() {
         fi
     fi
     
-    # Step 1: Generate client private/public key pair on server via SSM
+    # Step 1-2: Generate client key pair and preshared key
+    # With --local-keys, keys are generated on this machine with the local
+    # 'wg' binary: the client private key never transits through SSM (whose
+    # command content/output is retained by AWS for ~30 days).
+    # Without --local-keys, keys are generated on the server via SSM (no
+    # local dependency, but key material appears in SSM command history).
     local client_private_key
-    if ! client_private_key=$(execute_remote_command "$instance_id" "$region" \
-        "wg genkey" 60); then
-        echo "" >&2
-        echo "Error: Failed to generate client private key for $client_name" >&2
-        return 1
-    fi
-    
-    # Remove any trailing whitespace/newlines and ensure key is not logged
-    client_private_key=$(echo "$client_private_key" | tr -d '\n\r' | xargs)
-    
-    # Validate key format
-    if [ ${#client_private_key} -ne 44 ]; then
-        echo "" >&2
-        echo "Error: Generated client private key has unexpected format (length: ${#client_private_key}, expected: 44)" >&2
-        return 1
-    fi
-    
-    # Generate client public key from private key
     local client_public_key
-    if ! client_public_key=$(execute_remote_command "$instance_id" "$region" \
-        "echo '$client_private_key' | wg pubkey" 60); then
-        echo "" >&2
-        echo "Error: Failed to generate client public key for $client_name" >&2
-        return 1
+    local preshared_key
+
+    if [ "${LOCAL_KEYS:-false}" = "true" ]; then
+        echo "  Generating keys locally (--local-keys)..."
+        if ! client_private_key=$(wg genkey); then
+            echo "" >&2
+            echo "Error: Failed to generate client private key locally for $client_name" >&2
+            return 1
+        fi
+        client_public_key=$(printf '%s' "$client_private_key" | wg pubkey)
+        preshared_key=$(wg genpsk)
+    else
+        if ! client_private_key=$(execute_remote_command "$instance_id" "$region" \
+            "wg genkey" 60); then
+            echo "" >&2
+            echo "Error: Failed to generate client private key for $client_name" >&2
+            return 1
+        fi
+
+        # Remove any trailing whitespace/newlines and ensure key is not logged
+        client_private_key=$(echo "$client_private_key" | tr -d '\n\r' | xargs)
+
+        # Validate key format
+        if [ ${#client_private_key} -ne 44 ]; then
+            echo "" >&2
+            echo "Error: Generated client private key has unexpected format (length: ${#client_private_key}, expected: 44)" >&2
+            return 1
+        fi
+
+        # Generate client public key from private key
+        if ! client_public_key=$(execute_remote_command "$instance_id" "$region" \
+            "echo '$client_private_key' | wg pubkey" 60); then
+            echo "" >&2
+            echo "Error: Failed to generate client public key for $client_name" >&2
+            return 1
+        fi
+
+        # Generate preshared key for additional security (post-quantum resistance)
+        echo "  Generating preshared key..."
+        if ! preshared_key=$(execute_remote_command "$instance_id" "$region" \
+            "wg genpsk" 60); then
+            echo "" >&2
+            echo "Error: Failed to generate preshared key for $client_name" >&2
+            return 1
+        fi
     fi
-    
+
     # Remove any trailing whitespace/newlines
     client_public_key=$(echo "$client_public_key" | tr -d '\n\r' | xargs)
-    
+    preshared_key=$(echo "$preshared_key" | tr -d '\n\r' | xargs)
+
     # Validate public key format
     if [ ${#client_public_key} -ne 44 ]; then
         echo "" >&2
         echo "Error: Generated client public key has unexpected format (length: ${#client_public_key}, expected: 44)" >&2
         return 1
     fi
-    
-    # Step 2: Generate preshared key for additional security (post-quantum resistance)
-    echo "  Generating preshared key..."
-    local preshared_key
-    if ! preshared_key=$(execute_remote_command "$instance_id" "$region" \
-        "wg genpsk" 60); then
-        echo "" >&2
-        echo "Error: Failed to generate preshared key for $client_name" >&2
-        return 1
-    fi
-    
-    # Remove any trailing whitespace/newlines
-    preshared_key=$(echo "$preshared_key" | tr -d '\n\r' | xargs)
-    
+
     # Validate preshared key format
     if [ ${#preshared_key} -ne 44 ]; then
         echo "" >&2
@@ -1051,12 +1089,13 @@ generate_client_config() {
         echo "  Server AllowedIPs: $server_allowed_ips"
     fi
     
-    # Create temp file for preshared key, set peer, then remove
+    # Create temp file for preshared key (umask 077 so it is never
+    # world-readable), set peer, then remove
     # Note: wg set allowed-ips accepts comma-separated without spaces
     local wg_allowed_ips
     wg_allowed_ips=$(echo "$server_allowed_ips" | sed 's/, */,/g')
     if ! execute_remote_command "$instance_id" "$region" \
-        "echo '$preshared_key' | sudo tee /tmp/psk_$client_id.key > /dev/null && sudo wg set wg0 peer $client_public_key preshared-key /tmp/psk_$client_id.key allowed-ips $wg_allowed_ips && sudo rm -f /tmp/psk_$client_id.key" 60; then
+        "sudo bash -c 'umask 077; echo $preshared_key > /tmp/psk_$client_id.key' && sudo wg set wg0 peer $client_public_key preshared-key /tmp/psk_$client_id.key allowed-ips $wg_allowed_ips && sudo rm -f /tmp/psk_$client_id.key" 60; then
         echo "" >&2
         echo "Error: Failed to add peer to server config for $client_name" >&2
         echo "" >&2
@@ -1202,8 +1241,10 @@ PersistentKeepalive = 25"
     fi
     
     # Step 7: Write config to file
+    # umask 077 in a subshell so the file is created with owner-only
+    # permissions from the start (it contains the client private key)
     local config_file="$client_dir/$client_name.conf"
-    if ! echo "$client_config" > "$config_file" 2>/dev/null; then
+    if ! (umask 077; echo "$client_config" > "$config_file") 2>/dev/null; then
         echo "" >&2
         echo "Error: Failed to write client config file: $config_file" >&2
         echo "" >&2
@@ -1265,7 +1306,7 @@ OPTIONS:
                                   full: Route all traffic through VPN
                                   split: Route only VPC traffic through VPN
     --allowed-cidr <cidr>       Source CIDR allowed to connect to VPN port
-                                (repeatable, default: 0.0.0.0/0)
+                                (repeatable up to 5 times, default: 0.0.0.0/0)
                                 This controls WHO can reach your VPN server
     --my-ip                     Auto-detect and use your public IP/32
                                 (mutually exclusive with --allowed-cidr)
@@ -1274,7 +1315,8 @@ OPTIONS:
                                 This defines the internal VPC network
     --instance-type <type>      EC2 instance type (default: t4g.nano)
     --spot                      Use EC2 Spot instances for cost savings
-                                (lower cost but can be interrupted)
+                                (lower cost but can be interrupted; cannot be
+                                stopped/started, only deleted and recreated)
     --eip                       Allocate an Elastic IP for persistent public IP
                                 (recommended to avoid IP changes on stop/start)
     --reach-server              Include VPN server in AllowedIPs (10.99.0.0/24)
@@ -1295,6 +1337,14 @@ OPTIONS:
     --split-include-vpc <bool>  Include VPC CIDR in split mode (default: true)
                                 Set to false for pure site-to-site routing
     --auto-import-exported      Auto-import other routers' export subnets (hub mode)
+                                In add-client, merges every export subnet already
+                                registered in metadata into this client's imports
+    --local-keys                Generate client keys and preshared key locally
+                                (requires wireguard-tools on this machine).
+                                The client private key never transits through
+                                AWS SSM. Without this flag, keys are generated
+                                on the server via SSM (no local dependency, but
+                                key material appears in SSM command history)
     --mtu <value>               Custom MTU value (default: 1360)
                                 Lower values help with fragmentation issues
     --mss-clamping              Enable MSS clamping for TCP connections
@@ -1368,17 +1418,21 @@ UNDERSTANDING CIDR PARAMETERS:
 
 SPOT INSTANCES:
 
-    The --spot flag uses EC2 Spot instances instead of on-demand instances.
-    
+    The --spot flag uses EC2 Spot instances instead of on-demand instances
+    (one-time Spot request via the launch template).
+
     Benefits:
         - Significant cost savings (up to 90% off on-demand price)
         - Same performance as on-demand instances
-    
+        - Can be combined with --eip for a persistent public IP
+
     Considerations:
-        - Can be interrupted with 2-minute warning
+        - Can be interrupted with 2-minute warning (instance is terminated
+          and NOT relaunched automatically - delete and recreate the stack)
+        - Cannot be stopped/started with the stop/start commands
         - Best for temporary/disposable workloads
         - Not recommended for production or long-term use
-    
+
     Example: ./another_betterthannothing_vpn.sh create --spot --my-ip
 
 EXAMPLES:
@@ -1394,6 +1448,14 @@ EXAMPLES:
 
     # Create VPN with specific allowed network
     ./another_betterthannothing_vpn.sh create --allowed-cidr 203.0.113.0/24
+
+    # Create VPN reachable from multiple networks (up to 5)
+    ./another_betterthannothing_vpn.sh create \\
+        --allowed-cidr 203.0.113.0/24 \\
+        --allowed-cidr 198.51.100.7/32
+
+    # Create VPN generating client keys locally (never transit through SSM)
+    ./another_betterthannothing_vpn.sh create --my-ip --local-keys
 
     # Create VPN using Spot instances for cost savings
     ./another_betterthannothing_vpn.sh create --spot --my-ip
@@ -1438,7 +1500,14 @@ EXAMPLES:
     ./another_betterthannothing_vpn.sh status --name my-vpn
 
     # Add another client to existing stack
+    # (also honors --peer-type, --export-subnet, --import-subnet, --mtu,
+    #  --mss-clamping, --mss, --local-keys and --output-dir; --output-dir is
+    #  required if a non-default directory was used at create time)
     ./another_betterthannothing_vpn.sh add-client --name my-vpn
+
+    # Add a router client and auto-import other routers' exported LANs (hub)
+    ./another_betterthannothing_vpn.sh add-client --name my-vpn \\
+        --peer-type router --export-subnet 192.168.3.0/24 --auto-import-exported
 
     # Open SSM session to VPN server
     ./another_betterthannothing_vpn.sh ssm --name my-vpn
@@ -1480,6 +1549,7 @@ parse_args() {
     MSS_CLAMPING=false
     CUSTOM_MSS=""
     DEBUG_MODE=false
+    LOCAL_KEYS=false
     
     # New export/import subnet model (replaces router_subnets)
     EXPORT_SUBNETS=()
@@ -1610,6 +1680,10 @@ parse_args() {
                 CUSTOM_MSS="$2"
                 shift 2
                 ;;
+            --local-keys)
+                LOCAL_KEYS=true
+                shift
+                ;;
             --debug)
                 DEBUG_MODE=true
                 shift
@@ -1643,8 +1717,25 @@ parse_args() {
     
     # Export variables for use in command functions
     export COMMAND REGION STACK_NAME MODE USE_MY_IP VPC_CIDR INSTANCE_TYPE USE_SPOT ALLOCATE_EIP NUM_CLIENTS OUTPUT_DIR NON_INTERACTIVE REACH_SERVER
-    export ALLOWED_CIDRS PEER_TYPE CUSTOM_MTU MSS_CLAMPING CUSTOM_MSS DEBUG_MODE
+    export ALLOWED_CIDRS PEER_TYPE CUSTOM_MTU MSS_CLAMPING CUSTOM_MSS DEBUG_MODE LOCAL_KEYS
     export EXPORT_SUBNETS_STR IMPORT_SUBNETS_STR ROUTER_TUNNEL_MODE SPLIT_INCLUDE_VPC AUTO_IMPORT_EXPORTED
+
+    # Validate: --local-keys requires the WireGuard tools locally
+    if [ "$LOCAL_KEYS" = true ] && ! command -v wg &> /dev/null; then
+        echo "Error: --local-keys requires the 'wg' binary (wireguard-tools) on this machine" >&2
+        echo "" >&2
+        echo "Install it with:" >&2
+        echo "  - Debian/Ubuntu: sudo apt-get install wireguard-tools" >&2
+        echo "  - RHEL/Fedora:   sudo dnf install wireguard-tools" >&2
+        echo "  - macOS:         brew install wireguard-tools" >&2
+        exit 1
+    fi
+
+    # Validate: at most 5 --allowed-cidr values (CloudFormation template limit)
+    if [ ${#ALLOWED_CIDRS[@]} -gt 5 ]; then
+        echo "Error: A maximum of 5 --allowed-cidr values is supported. Got: ${#ALLOWED_CIDRS[@]}" >&2
+        exit 1
+    fi
     
     # Validate: --export-subnet requires --peer-type router
     if [ ${#EXPORT_SUBNETS[@]} -gt 0 ] && [ "$PEER_TYPE" != "router" ]; then
@@ -1707,23 +1798,32 @@ cmd_create() {
         validated_vpc_cidr=$(validate_vpc_cidr "$VPC_CIDR")
     fi
     
-    # Detect public IP if --my-ip flag is set
+    # Build the list of allowed ingress CIDRs (up to 5, template limit).
+    # Slot 1 is the primary CIDR; slots 2-5 default to the 'NONE' sentinel,
+    # which tells the template not to create the corresponding ingress rule.
     local allowed_ingress_cidr=""
+    local allowed_cidr_slots=("NONE" "NONE" "NONE" "NONE")
     if [ "$USE_MY_IP" = true ]; then
         echo "Detecting your public IP address..."
         allowed_ingress_cidr=$(detect_my_ip)
         echo "Detected IP: $allowed_ingress_cidr"
     elif [ ${#ALLOWED_CIDRS[@]} -gt 0 ]; then
-        # Use first allowed CIDR (for now, CloudFormation template supports single value)
-        # TODO: If template supports multiple CIDRs, handle array properly
+        # Validate every CIDR (IPv4 only: the security group rules are IPv4)
+        local cidr
+        for cidr in "${ALLOWED_CIDRS[@]}"; do
+            if [[ "$cidr" =~ : ]] || ! validate_cidr_format "$cidr"; then
+                echo "Error: Invalid CIDR format for --allowed-cidr: '$cidr'" >&2
+                echo "Expected format: x.x.x.x/y (IPv4 only)" >&2
+                exit 1
+            fi
+        done
+
         allowed_ingress_cidr="${ALLOWED_CIDRS[0]}"
-        
-        # Validate the CIDR format
-        if ! validate_cidr_format "$allowed_ingress_cidr"; then
-            echo "Error: Invalid CIDR format for --allowed-cidr: '$allowed_ingress_cidr'" >&2
-            echo "Expected format: x.x.x.x/y" >&2
-            exit 1
-        fi
+        local slot_idx=0
+        for cidr in "${ALLOWED_CIDRS[@]:1}"; do
+            allowed_cidr_slots[$slot_idx]="$cidr"
+            slot_idx=$((slot_idx + 1))
+        done
     else
         # Default to 0.0.0.0/0 (open to internet)
         allowed_ingress_cidr="0.0.0.0/0"
@@ -1778,6 +1878,21 @@ cmd_create() {
         echo "" >&2
     fi
     
+    # Validate: --auto-import-exported only makes sense in hub mode
+    if [ "$AUTO_IMPORT_EXPORTED" = true ] && [ "$ROUTER_TUNNEL_MODE" != "hub" ]; then
+        echo "Error: --auto-import-exported requires --router-tunnel hub" >&2
+        exit 1
+    fi
+
+    # Build display string for all allowed CIDRs
+    local allowed_ingress_display="$allowed_ingress_cidr"
+    local slot
+    for slot in "${allowed_cidr_slots[@]}"; do
+        if [ "$slot" != "NONE" ]; then
+            allowed_ingress_display="$allowed_ingress_display, $slot"
+        fi
+    done
+
     # Display summary of configuration
     echo ""
     echo "=== VPN Configuration Summary ==="
@@ -1785,11 +1900,12 @@ cmd_create() {
     echo "Region:            $REGION"
     echo "Mode:              $MODE"
     echo "VPC CIDR:          $validated_vpc_cidr"
-    echo "Allowed Ingress:   $allowed_ingress_cidr"
+    echo "Allowed Ingress:   $allowed_ingress_display"
     echo "Instance Type:     $INSTANCE_TYPE"
     echo "Spot Instance:     $USE_SPOT"
     echo "Elastic IP:        $ALLOCATE_EIP"
     echo "Initial Clients:   $NUM_CLIENTS"
+    echo "Local Key Gen:     $LOCAL_KEYS"
     echo "Output Directory:  $OUTPUT_DIR"
     echo "================================="
     echo ""
@@ -1810,28 +1926,45 @@ cmd_create() {
     instance_arch=$(detect_instance_architecture "$INSTANCE_TYPE")
     echo "Detected architecture for $INSTANCE_TYPE: $instance_arch"
     
-    # Prepare CloudFormation parameters array
-    local cf_parameters=(
-        "ParameterKey=VpcCidr,ParameterValue=$validated_vpc_cidr"
-        "ParameterKey=InstanceType,ParameterValue=$INSTANCE_TYPE"
-        "ParameterKey=InstanceArchitecture,ParameterValue=$instance_arch"
-        "ParameterKey=VpnPort,ParameterValue=51820"
-        "ParameterKey=VpnProtocol,ParameterValue=udp"
-        "ParameterKey=AllowedIngressCidr,ParameterValue=$allowed_ingress_cidr"
-        "ParameterKey=UseSpotInstance,ParameterValue=$USE_SPOT"
-        "ParameterKey=AllocateEIP,ParameterValue=$ALLOCATE_EIP"
-    )
-    
+    # Prepare CloudFormation parameters as real JSON (robust against any
+    # special characters in values, unlike the CLI shorthand syntax)
+    local cf_parameters_json
+    cf_parameters_json=$(jq -cn \
+        --arg vpc_cidr "$validated_vpc_cidr" \
+        --arg instance_type "$INSTANCE_TYPE" \
+        --arg instance_arch "$instance_arch" \
+        --arg cidr1 "$allowed_ingress_cidr" \
+        --arg cidr2 "${allowed_cidr_slots[0]}" \
+        --arg cidr3 "${allowed_cidr_slots[1]}" \
+        --arg cidr4 "${allowed_cidr_slots[2]}" \
+        --arg cidr5 "${allowed_cidr_slots[3]}" \
+        --arg use_spot "$USE_SPOT" \
+        --arg allocate_eip "$ALLOCATE_EIP" \
+        '[
+            {ParameterKey: "VpcCidr",              ParameterValue: $vpc_cidr},
+            {ParameterKey: "InstanceType",         ParameterValue: $instance_type},
+            {ParameterKey: "InstanceArchitecture", ParameterValue: $instance_arch},
+            {ParameterKey: "VpnPort",              ParameterValue: "51820"},
+            {ParameterKey: "VpnProtocol",          ParameterValue: "udp"},
+            {ParameterKey: "AllowedIngressCidr",   ParameterValue: $cidr1},
+            {ParameterKey: "AllowedIngressCidr2",  ParameterValue: $cidr2},
+            {ParameterKey: "AllowedIngressCidr3",  ParameterValue: $cidr3},
+            {ParameterKey: "AllowedIngressCidr4",  ParameterValue: $cidr4},
+            {ParameterKey: "AllowedIngressCidr5",  ParameterValue: $cidr5},
+            {ParameterKey: "UseSpotInstance",      ParameterValue: $use_spot},
+            {ParameterKey: "AllocateEIP",          ParameterValue: $allocate_eip}
+        ]')
+
     # Build CloudFormation create-stack command
     echo "Creating CloudFormation stack '$STACK_NAME' in region '$REGION'..."
     echo ""
-    
+
     # Execute create-stack command with parameters and tags
     local create_output
     if ! create_output=$(aws cloudformation create-stack \
         --stack-name "$STACK_NAME" \
         --template-body "file://${TEMPLATE_FILE}" \
-        --parameters "${cf_parameters[@]}" \
+        --parameters "$cf_parameters_json" \
         --capabilities CAPABILITY_NAMED_IAM \
         --tags "Key=CostCenter,Value=$STACK_NAME" \
         --region "$REGION" \
@@ -1869,41 +2002,14 @@ cmd_create() {
     echo "This typically takes 3-5 minutes (creating VPC, subnet, IGW, EC2 instance, etc.)"
     echo ""
     
-    # Show progress while waiting
     local wait_start=$(date +%s)
-    local dots=0
-    
-    # Start the wait in background and show progress
-    (
-        while true; do
-            # Check stack status
-            local current_status
-            current_status=$(aws cloudformation describe-stacks \
-                --stack-name "$STACK_NAME" \
-                --region "$REGION" \
-                --output json 2>/dev/null | jq -r '.Stacks[0].StackStatus // "UNKNOWN"')
-            
-            if [[ "$current_status" == "CREATE_COMPLETE" ]]; then
-                exit 0
-            elif [[ "$current_status" == *"FAILED"* ]] || [[ "$current_status" == "ROLLBACK_"* ]]; then
-                exit 1
-            fi
-            
-            sleep 10
-        done
-    ) &
-    local progress_pid=$!
-    
+
     # Wait for stack creation to complete with timeout
     # The wait command has a built-in timeout of 120 attempts * 30 seconds = 1 hour
     if ! aws cloudformation wait stack-create-complete \
         --stack-name "$STACK_NAME" \
         --region "$REGION" 2>&1; then
-        
-        # Kill progress indicator
-        kill $progress_pid 2>/dev/null || true
-        wait $progress_pid 2>/dev/null || true
-        
+
         # Stack creation failed - retrieve and display failed events
         echo "" >&2
         echo "✗ Stack creation failed" >&2
@@ -1938,11 +2044,7 @@ cmd_create() {
         
         exit 1
     fi
-    
-    # Kill progress indicator
-    kill $progress_pid 2>/dev/null || true
-    wait $progress_pid 2>/dev/null || true
-    
+
     local wait_end=$(date +%s)
     local wait_duration=$((wait_end - wait_start))
     
@@ -1962,43 +2064,16 @@ cmd_create() {
     local stack_outputs
     stack_outputs=$(get_stack_outputs "$STACK_NAME" "$REGION")
     
-    # For Spot Fleet, we need to wait for the instance to be launched
-    if [ "$USE_SPOT" = "true" ]; then
-        echo "Waiting for Spot Fleet instance to be launched..."
-        local spot_wait_attempts=0
-        local max_spot_wait=30  # 30 attempts * 10 seconds = 5 minutes
-        local instance_id=""
-        
-        while [ $spot_wait_attempts -lt $max_spot_wait ]; do
-            spot_wait_attempts=$((spot_wait_attempts + 1))
-            instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION")
-            
-            if [ -n "$instance_id" ] && [ "$instance_id" != "spot-fleet-managed" ]; then
-                echo "✓ Spot instance launched: $instance_id"
-                break
-            fi
-            
-            echo "  Attempt $spot_wait_attempts/$max_spot_wait: Waiting for Spot instance..."
-            sleep 10
-        done
-        
-        if [ -z "$instance_id" ] || [ "$instance_id" = "spot-fleet-managed" ]; then
-            echo "Error: Spot Fleet instance did not launch within timeout" >&2
-            echo "" >&2
-            echo "Check Spot Fleet status in AWS Console or try again later." >&2
-            exit 1
-        fi
-    else
-        # On-demand instance - get directly from outputs
-        local instance_id
-        instance_id=$(echo "$stack_outputs" | jq -r '.InstanceId // empty')
-        
-        if [ -z "$instance_id" ] || [ "$instance_id" = "spot-fleet-managed" ]; then
-            echo "Error: Failed to retrieve InstanceId from stack outputs" >&2
-            exit 1
-        fi
+    # Both on-demand and spot instances are real AWS::EC2::Instance resources,
+    # so the InstanceId output is always populated
+    local instance_id
+    instance_id=$(echo "$stack_outputs" | jq -r '.InstanceId // empty')
+
+    if [ -z "$instance_id" ]; then
+        echo "Error: Failed to retrieve InstanceId from stack outputs" >&2
+        exit 1
     fi
-    
+
     echo "Instance ID: $instance_id"
     echo ""
     
@@ -2015,24 +2090,19 @@ cmd_create() {
     
     # Extract necessary outputs for bootstrap
     local public_ip
-    if [ "$USE_SPOT" = "true" ]; then
-        # For Spot Fleet, get public IP from instance
-        public_ip=$(get_public_ip_from_stack "$STACK_NAME" "$REGION")
-    else
-        public_ip=$(echo "$stack_outputs" | jq -r '.PublicIp // empty')
-    fi
-    
+    public_ip=$(echo "$stack_outputs" | jq -r '.PublicIp // empty')
+
     local vpn_port
     vpn_port=$(echo "$stack_outputs" | jq -r '.VpnPort // "51820"')
-    
-    if [ -z "$public_ip" ] || [ "$public_ip" = "spot-fleet-managed" ]; then
+
+    if [ -z "$public_ip" ]; then
         echo "Error: Failed to retrieve PublicIp from stack outputs" >&2
         exit 1
     fi
-    
+
     # Bootstrap VPN server and capture server public key
     local server_public_key
-    if ! server_public_key=$(bootstrap_vpn_server "$instance_id" "$REGION" "$MODE" "$vpn_port" "$validated_vpc_cidr"); then
+    if ! server_public_key=$(bootstrap_vpn_server "$instance_id" "$REGION" "$MODE" "$vpn_port" "$validated_vpc_cidr" "$ROUTER_TUNNEL_MODE"); then
         echo "" >&2
         echo "Error: VPN server bootstrap failed" >&2
         echo "" >&2
@@ -2102,61 +2172,59 @@ cmd_create() {
         echo ""
     done
     
-    # Create metadata.json file in output directory (v2 format)
+    # Create metadata.json file in output directory (v3 format)
+    # v3 adds per-client peer_type/export_subnets/import_subnets (needed by
+    # --auto-import-exported in add-client) and the auto_import_exported flag
     local metadata_file="$OUTPUT_DIR/$STACK_NAME/metadata.json"
-    
-    # Convert export/import subnets strings to JSON arrays
-    local export_subnets_json="[]"
-    if [ -n "$EXPORT_SUBNETS_STR" ]; then
-        export_subnets_json=$(echo "$EXPORT_SUBNETS_STR" | tr ',' '\n' | jq -R . | jq -s .)
-    fi
-    
-    local import_subnets_json="[]"
-    if [ -n "$IMPORT_SUBNETS_STR" ]; then
-        import_subnets_json=$(echo "$IMPORT_SUBNETS_STR" | tr ',' '\n' | jq -R . | jq -s .)
-    fi
-    
-    local metadata_json="{
-  \"metadata_version\": 2,
-  \"stack_name\": \"$STACK_NAME\",
-  \"region\": \"$REGION\",
-  \"mode\": \"$MODE\",
-  \"reach_server\": $REACH_SERVER,
-  \"split_include_vpc\": $SPLIT_INCLUDE_VPC,
-  \"router_tunnel_mode\": \"$ROUTER_TUNNEL_MODE\",
-  \"peer_type\": \"$PEER_TYPE\",
-  \"export_subnets\": $export_subnets_json,
-  \"import_subnets\": $import_subnets_json,
-  \"mtu\": ${CUSTOM_MTU:-1360},
-  \"mss_clamping\": $MSS_CLAMPING,
-  \"custom_mss\": ${CUSTOM_MSS:-null},
-  \"server_endpoint\": \"$public_ip:$vpn_port\",
-  \"vpc_cidr\": \"$validated_vpc_cidr\",
-  \"created_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
-  \"clients\": ["
-    
-    # Add client entries
-    for ((i=1; i<=client_count; i++)); do
-        local client_name="client-$i"
-        local client_id=$((i + 1))
-        
-        if [ $i -gt 1 ]; then
-            metadata_json="$metadata_json,"
-        fi
-        
-        metadata_json="$metadata_json
-    {
-      \"name\": \"$client_name\",
-      \"address\": \"10.99.0.$client_id/32\",
-      \"created_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
-      \"config_file\": \"$client_name.conf\"
-    }"
-    done
-    
-    metadata_json="$metadata_json
-  ]
-}"
-    
+
+    local metadata_json
+    metadata_json=$(jq -n \
+        --arg stack_name "$STACK_NAME" \
+        --arg region "$REGION" \
+        --arg mode "$MODE" \
+        --argjson reach_server "$REACH_SERVER" \
+        --argjson split_include_vpc "$SPLIT_INCLUDE_VPC" \
+        --arg router_tunnel_mode "$ROUTER_TUNNEL_MODE" \
+        --argjson auto_import_exported "$AUTO_IMPORT_EXPORTED" \
+        --arg peer_type "$PEER_TYPE" \
+        --arg export_subnets "$EXPORT_SUBNETS_STR" \
+        --arg import_subnets "$IMPORT_SUBNETS_STR" \
+        --argjson mtu "${CUSTOM_MTU:-1360}" \
+        --argjson mss_clamping "$MSS_CLAMPING" \
+        --argjson custom_mss "${CUSTOM_MSS:-null}" \
+        --arg server_endpoint "$public_ip:$vpn_port" \
+        --arg vpc_cidr "$validated_vpc_cidr" \
+        --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --argjson client_count "$client_count" \
+        '{
+            metadata_version: 3,
+            stack_name: $stack_name,
+            region: $region,
+            mode: $mode,
+            reach_server: $reach_server,
+            split_include_vpc: $split_include_vpc,
+            router_tunnel_mode: $router_tunnel_mode,
+            auto_import_exported: $auto_import_exported,
+            peer_type: $peer_type,
+            export_subnets: ($export_subnets | if . == "" then [] else split(",") end),
+            import_subnets: ($import_subnets | if . == "" then [] else split(",") end),
+            mtu: $mtu,
+            mss_clamping: $mss_clamping,
+            custom_mss: $custom_mss,
+            server_endpoint: $server_endpoint,
+            vpc_cidr: $vpc_cidr,
+            created_at: $created_at,
+            clients: [range(1; $client_count + 1) | {
+                name: "client-\(.)",
+                address: "10.99.0.\(. + 1)/32",
+                created_at: $created_at,
+                config_file: "client-\(.).conf",
+                peer_type: $peer_type,
+                export_subnets: ($export_subnets | if . == "" then [] else split(",") end),
+                import_subnets: ($import_subnets | if . == "" then [] else split(",") end)
+            }]
+        }')
+
     # Write metadata file
     if ! echo "$metadata_json" > "$metadata_file" 2>/dev/null; then
         echo "Warning: Failed to write metadata file: $metadata_file" >&2
@@ -2345,21 +2413,24 @@ cmd_start() {
         exit 1
     fi
     
-    # Retrieve instance ID (handles both on-demand and Spot Fleet)
+    # Retrieve stack outputs once and reuse them (avoids redundant API calls)
     echo "Retrieving stack information..."
+    local stack_outputs
+    stack_outputs=$(get_stack_outputs "$STACK_NAME" "$REGION")
+
     local instance_id
-    instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION")
-    
+    instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION" "$stack_outputs")
+
     if [ -z "$instance_id" ] || [ "$instance_id" = "spot-fleet-managed" ]; then
         echo "Error: Failed to retrieve InstanceId from stack" >&2
         echo "" >&2
-        echo "If using Spot Fleet, the instance may not be running yet." >&2
+        echo "If using a Spot instance, it may have been interrupted or not launched yet." >&2
         exit 1
     fi
-    
+
     echo "Instance ID: $instance_id"
     echo ""
-    
+
     # Check current instance state
     echo "Checking instance state..."
     local instance_info
@@ -2371,13 +2442,27 @@ cmd_start() {
         echo "$instance_info" >&2
         exit 1
     fi
-    
+
     # Extract current state
     local current_state
     current_state=$(echo "$instance_info" | jq -r '.Reservations[0].Instances[0].State.Name // "unknown"')
-    
+
     echo "Current state: $current_state"
-    
+
+    # Spot instances (one-time requests) cannot be stopped/started
+    local instance_lifecycle
+    instance_lifecycle=$(echo "$instance_info" | jq -r '.Reservations[0].Instances[0].InstanceLifecycle // "on-demand"')
+    if [ "$instance_lifecycle" = "spot" ] && [ "$current_state" != "running" ]; then
+        echo "" >&2
+        echo "Error: Spot instances cannot be started manually." >&2
+        echo "" >&2
+        echo "Spot instances use one-time requests: once stopped or interrupted they" >&2
+        echo "cannot be restarted. Delete and recreate the stack instead:" >&2
+        echo "  ./another_betterthannothing_vpn.sh delete --name $STACK_NAME --region $REGION" >&2
+        echo "  ./another_betterthannothing_vpn.sh create --spot ..." >&2
+        exit 1
+    fi
+
     # If already running, display message and exit
     if [ "$current_state" = "running" ]; then
         echo ""
@@ -2498,21 +2583,21 @@ cmd_stop() {
         exit 1
     fi
     
-    # Retrieve instance ID (handles both on-demand and Spot Fleet)
+    # Retrieve instance ID (handles both current and legacy spot fleet stacks)
     echo "Retrieving stack information..."
     local instance_id
     instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION")
-    
+
     if [ -z "$instance_id" ] || [ "$instance_id" = "spot-fleet-managed" ]; then
         echo "Error: Failed to retrieve InstanceId from stack" >&2
         echo "" >&2
-        echo "If using Spot Fleet, the instance may not be running yet." >&2
+        echo "If using a Spot instance, it may have been interrupted or not launched yet." >&2
         exit 1
     fi
-    
+
     echo "Instance ID: $instance_id"
     echo ""
-    
+
     # Check current instance state
     echo "Checking instance state..."
     local instance_info
@@ -2524,13 +2609,26 @@ cmd_stop() {
         echo "$instance_info" >&2
         exit 1
     fi
-    
+
     # Extract current state
     local current_state
     current_state=$(echo "$instance_info" | jq -r '.Reservations[0].Instances[0].State.Name // "unknown"')
-    
+
     echo "Current state: $current_state"
-    
+
+    # Spot instances (one-time requests) cannot be stopped, only terminated
+    local instance_lifecycle
+    instance_lifecycle=$(echo "$instance_info" | jq -r '.Reservations[0].Instances[0].InstanceLifecycle // "on-demand"')
+    if [ "$instance_lifecycle" = "spot" ]; then
+        echo "" >&2
+        echo "Error: Spot instances cannot be stopped." >&2
+        echo "" >&2
+        echo "Spot instances use one-time requests and only support termination." >&2
+        echo "To remove all resources, delete the stack:" >&2
+        echo "  ./another_betterthannothing_vpn.sh delete --name $STACK_NAME --region $REGION" >&2
+        exit 1
+    fi
+
     # If already stopped, display message and exit
     if [ "$current_state" = "stopped" ]; then
         echo ""
@@ -2653,16 +2751,16 @@ cmd_status() {
     local stack_outputs
     stack_outputs=$(get_stack_outputs "$STACK_NAME" "$REGION")
     
-    # Extract key outputs (use helper for instance_id to handle Spot Fleet)
+    # Extract key outputs, reusing the already-fetched stack outputs
     local instance_id
-    instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION")
+    instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION" "$stack_outputs")
     if [ -z "$instance_id" ]; then
         instance_id="N/A"
     fi
-    
-    # Get public IP (use helper to handle Spot Fleet)
+
+    # Get public IP, reusing the already-fetched stack outputs
     local public_ip
-    public_ip=$(get_public_ip_from_stack "$STACK_NAME" "$REGION")
+    public_ip=$(get_public_ip_from_stack "$STACK_NAME" "$REGION" "$stack_outputs")
     if [ -z "$public_ip" ]; then
         public_ip="N/A"
     fi
@@ -2692,17 +2790,18 @@ cmd_status() {
     echo ""
     
     # Query instance status if we have an instance ID
+    # instance_state is reused later for the "Available Actions" section
+    local instance_state="unknown"
     if [ "$instance_id" != "N/A" ] && [ "$instance_id" != "spot-fleet-managed" ]; then
         echo "=== Instance Status ==="
-        
+
         local instance_info
         if instance_info=$(aws ec2 describe-instances \
             --instance-ids "$instance_id" \
             --region "$REGION" \
             --output json 2>&1); then
-            
+
             # Extract instance state
-            local instance_state
             instance_state=$(echo "$instance_info" | jq -r '.Reservations[0].Instances[0].State.Name // "unknown"')
             
             # Extract instance type
@@ -2796,13 +2895,8 @@ cmd_status() {
     echo ""
     
     # Display helpful next steps based on instance state
+    # (instance_state was captured during the Instance Status section)
     if [ "$instance_id" != "N/A" ]; then
-        local instance_state
-        instance_state=$(aws ec2 describe-instances \
-            --instance-ids "$instance_id" \
-            --region "$REGION" \
-            --output json 2>/dev/null | jq -r '.Reservations[0].Instances[0].State.Name // "unknown"')
-        
         echo "=== Available Actions ==="
         
         if [ "$instance_state" = "running" ]; then
@@ -2832,33 +2926,36 @@ cmd_list() {
     echo "Querying CloudFormation stacks in region '$REGION'..."
     echo ""
     
+    # A single unfiltered describe-stacks returns every live stack together
+    # with its outputs, avoiding one extra API call per stack
     local stacks_info
-    if ! stacks_info=$(aws cloudformation list-stacks \
+    if ! stacks_info=$(aws cloudformation describe-stacks \
         --region "$REGION" \
         --output json 2>&1); then
         echo "Error: Failed to list stacks in region '$REGION'" >&2
         echo "$stacks_info" >&2
         exit 1
     fi
-    
-    # Filter stacks with names matching pattern 'abthn-vpn-*'
-    # Filter out deleted stacks (status DELETE_COMPLETE)
+
+    # Filter stacks with names matching pattern 'abthn-vpn-*' and extract
+    # the VPN endpoint directly from the outputs already in the response
     local filtered_stacks
-    filtered_stacks=$(echo "$stacks_info" | jq -r '
-        .StackSummaries[] | 
-        select(.StackName | startswith("abthn-vpn-")) | 
-        select(.StackStatus != "DELETE_COMPLETE") |
+    filtered_stacks=$(echo "$stacks_info" | jq '[
+        .Stacks[] |
+        select(.StackName | startswith("abthn-vpn-")) |
         {
             StackName: .StackName,
             StackStatus: .StackStatus,
-            CreationTime: .CreationTime
+            CreationTime: .CreationTime,
+            PublicIp: ((.Outputs // []) | map(select(.OutputKey == "PublicIp")) | .[0].OutputValue // "N/A"),
+            VpnPort: ((.Outputs // []) | map(select(.OutputKey == "VpnPort")) | .[0].OutputValue // "N/A")
         }
-    ' | jq -s '.')
-    
+    ]')
+
     # Check if any stacks found
     local stack_count
     stack_count=$(echo "$filtered_stacks" | jq 'length')
-    
+
     if [ "$stack_count" -eq 0 ]; then
         echo "No VPN stacks found in region '$REGION'"
         echo ""
@@ -2867,47 +2964,32 @@ cmd_list() {
         echo ""
         exit 0
     fi
-    
+
     # Display table header
     echo "=== VPN Stacks in $REGION ==="
     echo ""
     printf "%-30s %-25s %-15s %-30s\n" "Stack Name" "Status" "Region" "VPN Endpoint"
     printf "%-30s %-25s %-15s %-30s\n" "----------" "------" "------" "------------"
-    
+
     # Iterate through each stack and display information
     echo "$filtered_stacks" | jq -c '.[]' | while read -r stack; do
         local stack_name
         stack_name=$(echo "$stack" | jq -r '.StackName')
-        
+
         local stack_status
         stack_status=$(echo "$stack" | jq -r '.StackStatus')
-        
-        # Retrieve VPN endpoint from stack outputs
+
+        local public_ip
+        public_ip=$(echo "$stack" | jq -r '.PublicIp')
+
+        local vpn_port
+        vpn_port=$(echo "$stack" | jq -r '.VpnPort')
+
         local vpn_endpoint="N/A"
-        
-        # Only try to get outputs if stack is in a complete state
-        if [[ "$stack_status" == *"COMPLETE"* ]] && [[ "$stack_status" != "DELETE_COMPLETE" ]]; then
-            # Get stack outputs
-            local stack_outputs
-            if stack_outputs=$(aws cloudformation describe-stacks \
-                --stack-name "$stack_name" \
-                --region "$REGION" \
-                --output json 2>/dev/null); then
-                
-                # Extract PublicIp and VpnPort from outputs
-                local public_ip
-                public_ip=$(echo "$stack_outputs" | jq -r '.Stacks[0].Outputs[]? | select(.OutputKey=="PublicIp") | .OutputValue // "N/A"')
-                
-                local vpn_port
-                vpn_port=$(echo "$stack_outputs" | jq -r '.Stacks[0].Outputs[]? | select(.OutputKey=="VpnPort") | .OutputValue // "N/A"')
-                
-                # Construct endpoint if both values are available
-                if [ "$public_ip" != "N/A" ] && [ "$vpn_port" != "N/A" ]; then
-                    vpn_endpoint="$public_ip:$vpn_port"
-                fi
-            fi
+        if [ "$public_ip" != "N/A" ] && [ "$vpn_port" != "N/A" ]; then
+            vpn_endpoint="$public_ip:$vpn_port"
         fi
-        
+
         # Display row
         printf "%-30s %-25s %-15s %-30s\n" "$stack_name" "$stack_status" "$REGION" "$vpn_endpoint"
     done
@@ -2956,31 +3038,31 @@ cmd_add_client() {
     local stack_status
     stack_status=$(echo "$stack_info" | jq -r '.Stacks[0].StackStatus // "UNKNOWN"')
     
-    if [ "$stack_status" != "CREATE_COMPLETE" ]; then
-        echo "Error: Stack '$STACK_NAME' is not in CREATE_COMPLETE status" >&2
+    if [ "$stack_status" != "CREATE_COMPLETE" ] && [ "$stack_status" != "UPDATE_COMPLETE" ]; then
+        echo "Error: Stack '$STACK_NAME' is not in a healthy status" >&2
         echo "Current status: $stack_status" >&2
         echo "" >&2
-        echo "The stack must be in CREATE_COMPLETE status to add clients." >&2
+        echo "The stack must be in CREATE_COMPLETE or UPDATE_COMPLETE status to add clients." >&2
         echo "" >&2
         echo "Check stack status:" >&2
         echo "  ./another_betterthannothing_vpn.sh status --name $STACK_NAME --region $REGION" >&2
         exit 1
     fi
-    
-    echo "✓ Stack is in CREATE_COMPLETE status"
+
+    echo "✓ Stack is in $stack_status status"
     echo ""
-    
+
     # Retrieve stack outputs to get endpoint, port, VPC CIDR, mode
     echo "Retrieving stack outputs..."
     local stack_outputs
     stack_outputs=$(get_stack_outputs "$STACK_NAME" "$REGION")
-    
-    # Extract necessary outputs (use helpers for instance_id and public_ip to handle Spot Fleet)
+
+    # Extract necessary outputs, reusing the already-fetched stack outputs
     local instance_id
-    instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION")
-    
+    instance_id=$(get_instance_id_from_stack "$STACK_NAME" "$REGION" "$stack_outputs")
+
     local public_ip
-    public_ip=$(get_public_ip_from_stack "$STACK_NAME" "$REGION")
+    public_ip=$(get_public_ip_from_stack "$STACK_NAME" "$REGION" "$stack_outputs")
     
     local vpn_port
     vpn_port=$(echo "$stack_outputs" | jq -r '.VpnPort // "51820"')
@@ -3077,6 +3159,20 @@ cmd_add_client() {
     else
         router_tunnel_mode=$(echo "$metadata" | jq -r '.router_tunnel_mode // "none"')
     fi
+
+    # Resolve auto-import-exported (CLI flag or stored preference from create)
+    local auto_import_exported
+    if [ "$AUTO_IMPORT_EXPORTED" = "true" ]; then
+        auto_import_exported="true"
+    else
+        auto_import_exported=$(echo "$metadata" | jq -r '.auto_import_exported // false')
+    fi
+
+    if [ "$auto_import_exported" = "true" ] && [ "$router_tunnel_mode" != "hub" ]; then
+        echo "Error: --auto-import-exported requires router tunnel mode 'hub'" >&2
+        echo "Current router tunnel mode: $router_tunnel_mode" >&2
+        exit 1
+    fi
     
     # Extract split_include_vpc from metadata
     local split_include_vpc
@@ -3110,6 +3206,43 @@ cmd_add_client() {
         custom_mss=$(echo "$metadata" | jq -r '.custom_mss // empty')
     fi
     
+    # Auto-import: merge every export subnet known to the stack (stack-level
+    # exports plus per-client exports recorded in metadata) into this client's
+    # import list, excluding the subnets this client exports itself
+    if [ "$auto_import_exported" = "true" ]; then
+        local own_exports_json
+        own_exports_json=$(jq -cn --arg s "$export_subnets_str" '$s | if . == "" then [] else split(",") end')
+
+        local merged_imports
+        merged_imports=$(echo "$metadata" | jq -r \
+            --argjson own "$own_exports_json" \
+            --arg imports "$import_subnets_str" \
+            '[
+                (.export_subnets // []),
+                [.clients[]? | .export_subnets // [] | .[]],
+                ($imports | if . == "" then [] else split(",") end)
+            ] | flatten | unique | map(select(. as $s | $own | index($s) | not)) | join(",")')
+
+        if [ "$merged_imports" != "$import_subnets_str" ]; then
+            echo "Auto-importing exported subnets from other peers:"
+            echo "  Import subnets: ${merged_imports:-<none>}"
+            import_subnets_str="$merged_imports"
+        fi
+    fi
+
+    # In hub mode, make sure the server forwards traffic between VPN peers
+    # (idempotent: covers stacks created before hub mode was enabled)
+    if [ "$router_tunnel_mode" = "hub" ]; then
+        echo "Ensuring hub forwarding rules on server..."
+        execute_remote_command "$instance_id" "$REGION" \
+            "sudo iptables -C FORWARD -i wg0 -o wg0 -j ACCEPT 2>/dev/null || sudo iptables -A FORWARD -i wg0 -o wg0 -j ACCEPT" 60 > /dev/null || \
+            echo "Warning: Failed to add hub forwarding rule" >&2
+        execute_remote_command "$instance_id" "$REGION" \
+            "grep -q 'FORWARD -i wg0 -o wg0' /etc/wireguard/wg0.conf || sudo sed -i '/^\\[Interface\\]/a PostUp = iptables -A FORWARD -i wg0 -o wg0 -j ACCEPT' /etc/wireguard/wg0.conf" 60 > /dev/null || true
+        execute_remote_command "$instance_id" "$REGION" \
+            "grep -q 'PostDown = iptables -D FORWARD -i wg0 -o wg0' /etc/wireguard/wg0.conf || sudo sed -i '/^PostUp = iptables -A FORWARD -i wg0 -o wg0/a PostDown = iptables -D FORWARD -i wg0 -o wg0 -j ACCEPT' /etc/wireguard/wg0.conf" 60 > /dev/null || true
+    fi
+
     # Extract existing clients count to determine next client ID
     local existing_client_count
     existing_client_count=$(echo "$metadata" | jq -r '.clients | length')
@@ -3191,18 +3324,25 @@ cmd_add_client() {
     # Update metadata.json with new client entry
     echo "Updating metadata file..."
     
-    # Create new client entry
+    # Create new client entry (includes peer/subnet info so that
+    # --auto-import-exported can discover other routers' exports later)
     local new_client_entry
     new_client_entry=$(jq -n \
         --arg name "$next_client_name" \
         --arg address "10.99.0.$next_client_id/32" \
         --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg config_file "$next_client_name.conf" \
+        --arg peer_type "$peer_type" \
+        --arg export_subnets "$export_subnets_str" \
+        --arg import_subnets "$import_subnets_str" \
         '{
             name: $name,
             address: $address,
             created_at: $created_at,
-            config_file: $config_file
+            config_file: $config_file,
+            peer_type: $peer_type,
+            export_subnets: ($export_subnets | if . == "" then [] else split(",") end),
+            import_subnets: ($import_subnets | if . == "" then [] else split(",") end)
         }')
     
     # Add new client to metadata

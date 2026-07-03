@@ -313,15 +313,15 @@ Create a new VPN stack with all infrastructure and configuration.
 
 **Options:**
 - `--region <region>` - AWS region (default: us-east-1)
-- `--name <stack-name>` - Stack name (default: auto-generated as `another-YYYYMMDD-xxxx`)
+- `--name <stack-name>` - Stack name (default: auto-generated as `abthn-vpn-YYYYMMDD-xxxx`)
 - `--mode <full|split>` - Tunnel mode (default: split)
   - `full`: Route all traffic through VPN
   - `split`: Route only VPC traffic through VPN
-- `--allowed-cidr <cidr>` - Source CIDR allowed to connect to VPN port (repeatable, default: 0.0.0.0/0)
+- `--allowed-cidr <cidr>` - Source CIDR allowed to connect to VPN port (repeatable up to 5 times, default: 0.0.0.0/0)
 - `--my-ip` - Auto-detect and use your public IP/32 (mutually exclusive with --allowed-cidr)
 - `--vpc-cidr <cidr>` - VPC CIDR block (default: 10.10.0.0/16, must be RFC 1918 private range)
-- `--instance-type <type>` - EC2 instance type (default: t4g.nano)
-- `--spot` - Use EC2 Spot instances for lower cost (can be interrupted)
+- `--instance-type <type>` - EC2 instance type (default: t4g.nano). Architecture (arm64/x86_64) is detected automatically via the EC2 API.
+- `--spot` - Use EC2 Spot instances for lower cost (can be interrupted; cannot be stopped/started, only deleted and recreated)
 - `--eip` - Allocate an Elastic IP for persistent public IP address
 - `--reach-server` - Include VPN server subnet (10.99.0.0/24) in client AllowedIPs, allowing clients to reach services running on the VPN server itself (e.g., Docker containers)
 - `--peer-type <host|router>` - Peer type: `host` (default) for standard clients, `router` for site-to-site with LAN subnets
@@ -329,14 +329,15 @@ Create a new VPN stack with all infrastructure and configuration.
 - `--import-subnet <cidr>` - Remote LAN subnet you want to REACH (repeatable, only with `--peer-type router`). Added to client's AllowedIPs.
 - `--router-tunnel <none|hub>` - Router interconnection mode (default: none). `hub` allows routers to reach each other's LANs.
 - `--split-include-vpc <true|false>` - Include VPC CIDR in split mode AllowedIPs (default: true). Set to false for pure site-to-site.
-- `--auto-import-exported` - Auto-import other routers' export subnets (hub mode only)
+- `--auto-import-exported` - Auto-import other routers' export subnets (hub mode only). In `add-client`, merges every export subnet already registered in the stack metadata into the new client's import list.
+- `--local-keys` - Generate client keys and preshared key locally with the `wg` binary (requires wireguard-tools on your machine). The client private key never transits through AWS SSM. Without this flag, keys are generated on the server via SSM: no local dependency, but key material appears in the SSM command history for ~30 days.
 - `--mtu <value>` - Custom MTU value (default: 1360)
 - `--mss-clamping` - Enable MSS clamping for TCP connections (useful for router peers)
 - `--mss <value>` - Custom MSS value (default: MTU - 80). Only used with --mss-clamping.
 - `--debug` - Enable debug output for troubleshooting
 - `--clients <n>` - Number of initial client configs to generate (default: 1)
 - `--output-dir <path>` - Output directory for client configs (default: ./another_betterthannothing_vpn_config)
-- `--yes` - Skip confirmation prompts
+- `--yes`, `--non-interactive` - Skip confirmation prompts
 
 **Examples:**
 ```bash
@@ -351,6 +352,14 @@ Create a new VPN stack with all infrastructure and configuration.
 
 # Use Spot instance for cost savings
 ./another_betterthannothing_vpn.sh create --my-ip --spot
+
+# Allow multiple source networks (up to 5)
+./another_betterthannothing_vpn.sh create \
+    --allowed-cidr 203.0.113.0/24 \
+    --allowed-cidr 198.51.100.7/32
+
+# Generate client keys locally (they never transit through SSM)
+./another_betterthannothing_vpn.sh create --my-ip --local-keys
 
 # Custom VPC CIDR to avoid conflicts
 ./another_betterthannothing_vpn.sh create --my-ip --vpc-cidr 172.16.0.0/16
@@ -450,10 +459,22 @@ Generate a new client configuration for an existing VPN stack.
 
 **Options:**
 - `--region <region>` - AWS region (default: us-east-1)
+- `--output-dir <path>` - Output directory where `metadata.json` and client configs live (default: ./another_betterthannothing_vpn_config). **Required if a non-default directory was used at create time.**
+- `--peer-type <host|router>` - Peer type for the new client (default: value stored in metadata)
+- `--export-subnet <cidr>` - LAN subnet behind the new router client (repeatable, overrides metadata)
+- `--import-subnet <cidr>` - Remote LAN subnet the new client should reach (repeatable, overrides metadata)
+- `--auto-import-exported` - Merge every export subnet already registered in the stack metadata into this client's import list (hub mode only)
+- `--reach-server` - Include the VPN server subnet in the client's AllowedIPs
+- `--mtu <value>` / `--mss-clamping` / `--mss <value>` - Override MTU/MSS settings stored in metadata
+- `--local-keys` - Generate this client's keys locally (see `create`)
 
-**Example:**
+**Examples:**
 ```bash
 ./another_betterthannothing_vpn.sh add-client --name abthn-vpn-20260201-a3f9
+
+# Add a router client and auto-import other routers' exported LANs (hub mode)
+./another_betterthannothing_vpn.sh add-client --name abthn-vpn-20260201-a3f9 \
+    --peer-type router --export-subnet 192.168.3.0/24 --auto-import-exported
 ```
 
 **Output:**
@@ -506,7 +527,15 @@ Start or stop the EC2 instance (VPN will be unavailable when stopped).
 ./another_betterthannothing_vpn.sh stop --name <stack-name>
 ```
 
-**Note:** Stopping and starting the instance will change its public IP address. You'll need to update client configurations with the new endpoint.
+**Note:** Stopping and starting the instance will change its public IP address (unless the stack was created with `--eip`). You'll need to update client configurations with the new endpoint. Spot instances cannot be stopped/started: delete and recreate the stack instead.
+
+#### `help`
+
+Show the built-in help message (also available as `--help`).
+
+```bash
+./another_betterthannothing_vpn.sh help
+```
 
 ## Understanding CIDR Parameters
 
@@ -721,7 +750,7 @@ The `--router-tunnel` option controls how router peers interact with each other:
 
 - **none** (default): Routers can only reach the server/VPC, not each other's LANs. Use this for simple site-to-VPC connectivity.
 
-- **hub**: Server acts as a hub where routers can reach each other's exported LANs. Use `--auto-import-exported` to automatically add other routers' export subnets to your import list.
+- **hub**: Server acts as a hub where routers can reach each other's exported LANs. The server enables forwarding between VPN peers (`iptables FORWARD -i wg0 -o wg0`), persisted via PostUp/PostDown in the server config. Use `--auto-import-exported` to automatically add other routers' export subnets to your import list when adding new clients: the exports of every peer are recorded in `metadata.json` and merged (minus the new client's own exports) into its AllowedIPs.
 
 ### Router Configuration Example
 
@@ -887,7 +916,7 @@ If you're using the VPN for short-term tasks, use `--spot` to save ~70% on compu
 ./another_betterthannothing_vpn.sh create --my-ip --spot
 ```
 
-**Trade-off:** Spot instances can be interrupted with 2-minute notice. Not suitable for long-running connections.
+**Trade-off:** Spot instances can be interrupted with 2-minute notice (the instance is terminated and not relaunched automatically) and cannot be stopped/started with the `stop`/`start` commands. Not suitable for long-running connections.
 
 ### 3. Rotate VPN Infrastructure Regularly
 
@@ -933,9 +962,13 @@ Each client connection uses a unique PresharedKey in addition to the standard pu
 MTU is set to 1360 bytes to prevent fragmentation issues common with VPN tunnels over EC2/NAT connections, ensuring stable and reliable connections.
 
 **Key Storage:**
-- Client configurations (`.conf` files) are stored with 600 permissions
+- Client configurations (`.conf` files) are created with 600 permissions from the start (umask 077)
 - Public keys are saved separately in the `keys/` directory for reference
 - Private keys never leave the client configuration file
+- The server private key is generated on the instance and never leaves it (it is not sent or retrieved through SSM)
+
+**Key Generation and SSM (`--local-keys`):**
+By default, client keys are generated on the server via AWS SSM, which means key material transits through SSM command content/output. AWS retains SSM command history for about 30 days, where it is readable by IAM principals with `ssm:GetCommandInvocation` permissions. With `--local-keys`, client keys and preshared keys are generated locally with the `wg` binary and the client private key never transits through AWS. (The preshared key must still reach the server once, in both modes.)
 
 ```bash
 # Output directory structure
@@ -998,7 +1031,7 @@ The CloudFormation template enforces IMDSv2 (Instance Metadata Service version 2
 
 This is configured automatically; no action needed.
 
-### 9. No SSH Access
+### 10. No SSH Access
 
 The Security Group does NOT allow SSH (port 22). All access is via SSM:
 
@@ -1013,7 +1046,7 @@ The Security Group does NOT allow SSH (port 22). All access is via SSM:
 - IAM-based authentication
 - Session logging via CloudTrail
 
-### 10. Review CloudFormation Template
+### 11. Review CloudFormation Template
 
 Before deploying, review the `template.yaml` to understand what resources are created:
 

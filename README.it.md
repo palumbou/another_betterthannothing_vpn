@@ -316,15 +316,15 @@ Crea un nuovo stack VPN con tutta l'infrastruttura e la configurazione.
 
 **Opzioni:**
 - `--region <regione>` - Regione AWS (predefinito: us-east-1)
-- `--name <nome-stack>` - Nome dello stack (predefinito: generato automaticamente come `another-YYYYMMDD-xxxx`)
+- `--name <nome-stack>` - Nome dello stack (predefinito: generato automaticamente come `abthn-vpn-YYYYMMDD-xxxx`)
 - `--mode <full|split>` - Modalità tunnel (predefinito: split)
   - `full`: Instrada tutto il traffico attraverso la VPN
   - `split`: Instrada solo il traffico VPC attraverso la VPN
-- `--allowed-cidr <cidr>` - CIDR sorgente autorizzato a connettersi alla porta VPN (ripetibile, predefinito: 0.0.0.0/0)
+- `--allowed-cidr <cidr>` - CIDR sorgente autorizzato a connettersi alla porta VPN (ripetibile fino a 5 volte, predefinito: 0.0.0.0/0)
 - `--my-ip` - Rileva automaticamente e usa il tuo IP pubblico/32 (mutuamente esclusivo con --allowed-cidr)
 - `--vpc-cidr <cidr>` - Blocco CIDR VPC (predefinito: 10.10.0.0/16, deve essere un intervallo privato RFC 1918)
-- `--instance-type <tipo>` - Tipo di istanza EC2 (predefinito: t4g.nano)
-- `--spot` - Usa istanze EC2 Spot per costi inferiori (possono essere interrotte)
+- `--instance-type <tipo>` - Tipo di istanza EC2 (predefinito: t4g.nano). L'architettura (arm64/x86_64) viene rilevata automaticamente tramite l'API EC2.
+- `--spot` - Usa istanze EC2 Spot per costi inferiori (possono essere interrotte; non possono essere fermate/avviate, solo eliminate e ricreate)
 - `--eip` - Alloca un Elastic IP per un indirizzo IP pubblico persistente
 - `--reach-server` - Include la subnet del server VPN (10.99.0.0/24) negli AllowedIPs del client, permettendo ai client di raggiungere servizi in esecuzione sul server VPN stesso (es. container Docker)
 - `--peer-type <host|router>` - Tipo di peer: `host` (predefinito) per client standard, `router` per site-to-site con subnet LAN
@@ -332,14 +332,15 @@ Crea un nuovo stack VPN con tutta l'infrastruttura e la configurazione.
 - `--import-subnet <cidr>` - Subnet LAN remota che vuoi RAGGIUNGERE (ripetibile, solo con `--peer-type router`). Aggiunta agli AllowedIPs del client.
 - `--router-tunnel <none|hub>` - Modalità interconnessione router (predefinito: none). `hub` permette ai router di raggiungere le LAN degli altri.
 - `--split-include-vpc <true|false>` - Include CIDR VPC negli AllowedIPs in modalità split (predefinito: true). Imposta a false per site-to-site puro.
-- `--auto-import-exported` - Auto-importa le export subnet degli altri router (solo modalità hub)
+- `--auto-import-exported` - Auto-importa le export subnet degli altri router (solo modalità hub). In `add-client`, unisce ogni export subnet già registrata nei metadati dello stack nella lista import del nuovo client.
+- `--local-keys` - Genera le chiavi client e la preshared key localmente con il binario `wg` (richiede wireguard-tools sulla tua macchina). La chiave privata del client non transita mai attraverso AWS SSM. Senza questo flag, le chiavi vengono generate sul server tramite SSM: nessuna dipendenza locale, ma il materiale delle chiavi appare nella cronologia dei comandi SSM per ~30 giorni.
 - `--mtu <valore>` - Valore MTU personalizzato (predefinito: 1360)
 - `--mss-clamping` - Abilita MSS clamping per connessioni TCP (utile per router peer)
 - `--mss <valore>` - Valore MSS personalizzato (predefinito: MTU - 80). Usato solo con --mss-clamping.
 - `--debug` - Abilita output di debug per troubleshooting
 - `--clients <n>` - Numero di configurazioni client iniziali da generare (predefinito: 1)
 - `--output-dir <percorso>` - Directory di output per le configurazioni client (predefinito: ./another_betterthannothing_vpn_config)
-- `--yes` - Salta i prompt di conferma
+- `--yes`, `--non-interactive` - Salta i prompt di conferma
 
 **Esempi:**
 ```bash
@@ -354,6 +355,14 @@ Crea un nuovo stack VPN con tutta l'infrastruttura e la configurazione.
 
 # Usa istanza Spot per risparmiare sui costi
 ./another_betterthannothing_vpn.sh create --my-ip --spot
+
+# Consenti più reti sorgente (fino a 5)
+./another_betterthannothing_vpn.sh create \
+    --allowed-cidr 203.0.113.0/24 \
+    --allowed-cidr 198.51.100.7/32
+
+# Genera le chiavi client localmente (non transitano mai attraverso SSM)
+./another_betterthannothing_vpn.sh create --my-ip --local-keys
 
 # CIDR VPC personalizzato per evitare conflitti
 ./another_betterthannothing_vpn.sh create --my-ip --vpc-cidr 172.16.0.0/16
@@ -454,10 +463,22 @@ Genera una nuova configurazione client per uno stack VPN esistente.
 
 **Opzioni:**
 - `--region <regione>` - Regione AWS (predefinito: us-east-1)
+- `--output-dir <percorso>` - Directory di output dove risiedono `metadata.json` e le configurazioni client (predefinito: ./another_betterthannothing_vpn_config). **Obbligatoria se in fase di creazione è stata usata una directory non predefinita.**
+- `--peer-type <host|router>` - Tipo di peer per il nuovo client (predefinito: valore salvato nei metadati)
+- `--export-subnet <cidr>` - Subnet LAN dietro il nuovo router client (ripetibile, sovrascrive i metadati)
+- `--import-subnet <cidr>` - Subnet LAN remota che il nuovo client deve raggiungere (ripetibile, sovrascrive i metadati)
+- `--auto-import-exported` - Unisce ogni export subnet già registrata nei metadati dello stack nella lista import di questo client (solo modalità hub)
+- `--reach-server` - Include la subnet del server VPN negli AllowedIPs del client
+- `--mtu <valore>` / `--mss-clamping` / `--mss <valore>` - Sovrascrivono le impostazioni MTU/MSS salvate nei metadati
+- `--local-keys` - Genera le chiavi di questo client localmente (vedi `create`)
 
-**Esempio:**
+**Esempi:**
 ```bash
 ./another_betterthannothing_vpn.sh add-client --name abthn-vpn-20260201-a3f9
+
+# Aggiungi un router client e auto-importa le LAN esportate dagli altri router (modalità hub)
+./another_betterthannothing_vpn.sh add-client --name abthn-vpn-20260201-a3f9 \
+    --peer-type router --export-subnet 192.168.3.0/24 --auto-import-exported
 ```
 
 **Output:**
@@ -510,8 +531,15 @@ Avvia o ferma l'istanza EC2 (la VPN non sarà disponibile quando è fermata).
 ./another_betterthannothing_vpn.sh stop --name <nome-stack>
 ```
 
-**Nota:** Fermare e avviare l'istanza cambierà il suo indirizzo IP pubblico. Dovrai aggiornare le configurazioni client con il nuovo endpoint.
+**Nota:** Fermare e avviare l'istanza cambierà il suo indirizzo IP pubblico (a meno che lo stack non sia stato creato con `--eip`). Dovrai aggiornare le configurazioni client con il nuovo endpoint. Le istanze Spot non possono essere fermate/avviate: in quel caso elimina e ricrea lo stack.
 
+#### `help`
+
+Mostra il messaggio di aiuto integrato (disponibile anche come `--help`).
+
+```bash
+./another_betterthannothing_vpn.sh help
+```
 
 ## Comprendere i Parametri CIDR
 
@@ -726,7 +754,7 @@ L'opzione `--router-tunnel` controlla come i router peer interagiscono tra loro:
 
 - **none** (default): I router possono raggiungere solo il server/VPC, non le LAN degli altri router. Usa questo per semplice connettività site-to-VPC.
 
-- **hub**: Il server agisce come hub dove i router possono raggiungere le LAN esportate dagli altri. Usa `--auto-import-exported` per aggiungere automaticamente le export subnet degli altri router alla tua lista import.
+- **hub**: Il server agisce come hub dove i router possono raggiungere le LAN esportate dagli altri. Il server abilita il forwarding tra peer VPN (`iptables FORWARD -i wg0 -o wg0`), reso persistente tramite PostUp/PostDown nella configurazione del server. Usa `--auto-import-exported` per aggiungere automaticamente le export subnet degli altri router alla tua lista import quando aggiungi nuovi client: le export di ogni peer vengono registrate in `metadata.json` e unite (meno le export del nuovo client stesso) nei suoi AllowedIPs.
 
 ### Esempio Configurazione Router
 
@@ -893,7 +921,7 @@ Se stai usando la VPN per attività a breve termine, usa `--spot` per risparmiar
 ./another_betterthannothing_vpn.sh create --my-ip --spot
 ```
 
-**Compromesso:** Le istanze Spot possono essere interrotte con 2 minuti di preavviso. Non adatte per connessioni di lunga durata.
+**Compromesso:** Le istanze Spot possono essere interrotte con 2 minuti di preavviso (l'istanza viene terminata e non viene riavviata automaticamente) e non possono essere fermate/avviate con i comandi `stop`/`start`. Non adatte per connessioni di lunga durata.
 
 ### 3. Ruota Regolarmente l'Infrastruttura VPN
 
@@ -939,9 +967,13 @@ Ogni connessione client utilizza una PresharedKey unica oltre alla coppia standa
 L'MTU è impostato a 1360 byte per prevenire problemi di frammentazione comuni con tunnel VPN su connessioni EC2/NAT, garantendo connessioni stabili e affidabili.
 
 **Archiviazione Chiavi:**
-- Le configurazioni client (file `.conf`) sono salvate con permessi 600
+- Le configurazioni client (file `.conf`) sono create con permessi 600 fin dall'inizio (umask 077)
 - Le chiavi pubbliche sono salvate separatamente nella directory `keys/` per riferimento
 - Le chiavi private non lasciano mai il file di configurazione client
+- La chiave privata del server viene generata sull'istanza e non la lascia mai (non viene inviata né recuperata tramite SSM)
+
+**Generazione delle Chiavi e SSM (`--local-keys`):**
+Per impostazione predefinita, le chiavi client vengono generate sul server tramite AWS SSM, il che significa che il materiale delle chiavi transita attraverso il contenuto/output dei comandi SSM. AWS conserva la cronologia dei comandi SSM per circa 30 giorni, durante i quali è leggibile dai principal IAM con permessi `ssm:GetCommandInvocation`. Con `--local-keys`, le chiavi client e le preshared key vengono generate localmente con il binario `wg` e la chiave privata del client non transita mai attraverso AWS. (La preshared key deve comunque raggiungere il server una volta, in entrambe le modalità.)
 
 ```bash
 # Struttura directory di output
@@ -1004,7 +1036,7 @@ Il template CloudFormation applica IMDSv2 (Instance Metadata Service versione 2)
 
 Questo è configurato automaticamente; nessuna azione necessaria.
 
-### 9. Nessun Accesso SSH
+### 10. Nessun Accesso SSH
 
 Il Security Group NON consente SSH (porta 22). Tutto l'accesso avviene tramite SSM:
 
@@ -1019,7 +1051,7 @@ Il Security Group NON consente SSH (porta 22). Tutto l'accesso avviene tramite S
 - Autenticazione basata su IAM
 - Registrazione delle sessioni tramite CloudTrail
 
-### 10. Rivedi il Template CloudFormation
+### 11. Rivedi il Template CloudFormation
 
 Prima di rilasciare, rivedi il `template.yaml` per capire quali risorse vengono create:
 

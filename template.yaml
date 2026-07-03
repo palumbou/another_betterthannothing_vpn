@@ -41,8 +41,36 @@ Parameters:
     Type: String
     Default: '0.0.0.0/0'
     Description: 'Source CIDR allowed to connect to the VPN port (use --my-ip for better security)'
-    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}'
+    AllowedPattern: '^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/([0-9]|[12][0-9]|3[0-2])$'
     ConstraintDescription: 'Must be a valid CIDR block (e.g., 203.0.113.0/24 or 0.0.0.0/0)'
+
+  AllowedIngressCidr2:
+    Type: String
+    Default: 'NONE'
+    Description: 'Optional additional source CIDR allowed to connect to the VPN port'
+    AllowedPattern: '^(NONE|(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/([0-9]|[12][0-9]|3[0-2]))$'
+    ConstraintDescription: 'Must be NONE or a valid CIDR block'
+
+  AllowedIngressCidr3:
+    Type: String
+    Default: 'NONE'
+    Description: 'Optional additional source CIDR allowed to connect to the VPN port'
+    AllowedPattern: '^(NONE|(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/([0-9]|[12][0-9]|3[0-2]))$'
+    ConstraintDescription: 'Must be NONE or a valid CIDR block'
+
+  AllowedIngressCidr4:
+    Type: String
+    Default: 'NONE'
+    Description: 'Optional additional source CIDR allowed to connect to the VPN port'
+    AllowedPattern: '^(NONE|(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/([0-9]|[12][0-9]|3[0-2]))$'
+    ConstraintDescription: 'Must be NONE or a valid CIDR block'
+
+  AllowedIngressCidr5:
+    Type: String
+    Default: 'NONE'
+    Description: 'Optional additional source CIDR allowed to connect to the VPN port'
+    AllowedPattern: '^(NONE|(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/([0-9]|[12][0-9]|3[0-2]))$'
+    ConstraintDescription: 'Must be NONE or a valid CIDR block'
 
   UseSpotInstance:
     Type: String
@@ -62,9 +90,12 @@ Parameters:
 
 Conditions:
   UseSpot: !Equals [!Ref UseSpotInstance, 'true']
-  UseOnDemand: !Not [!Equals [!Ref UseSpotInstance, 'true']]
   ShouldAllocateEIP: !Equals [!Ref AllocateEIP, 'true']
   IsArm64: !Equals [!Ref InstanceArchitecture, 'arm64']
+  HasCidr2: !Not [!Equals [!Ref AllowedIngressCidr2, 'NONE']]
+  HasCidr3: !Not [!Equals [!Ref AllowedIngressCidr3, 'NONE']]
+  HasCidr4: !Not [!Equals [!Ref AllowedIngressCidr4, 'NONE']]
+  HasCidr5: !Not [!Equals [!Ref AllowedIngressCidr5, 'NONE']]
 
 Resources:
   VPC:
@@ -142,7 +173,7 @@ Resources:
           FromPort: !Ref VpnPort
           ToPort: !Ref VpnPort
           CidrIp: !Ref AllowedIngressCidr
-          Description: 'VPN traffic from allowed CIDR'
+          Description: 'VPN traffic from allowed CIDR 1'
       SecurityGroupEgress:
         - IpProtocol: '-1'
           CidrIp: '0.0.0.0/0'
@@ -152,6 +183,50 @@ Resources:
           Value: !Sub '${AWS::StackName}-vpn-sg'
         - Key: CostCenter
           Value: !Ref AWS::StackName
+
+  VpnIngressRule2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasCidr2
+    Properties:
+      GroupId: !Ref VpnSecurityGroup
+      IpProtocol: !Ref VpnProtocol
+      FromPort: !Ref VpnPort
+      ToPort: !Ref VpnPort
+      CidrIp: !Ref AllowedIngressCidr2
+      Description: 'VPN traffic from allowed CIDR 2'
+
+  VpnIngressRule3:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasCidr3
+    Properties:
+      GroupId: !Ref VpnSecurityGroup
+      IpProtocol: !Ref VpnProtocol
+      FromPort: !Ref VpnPort
+      ToPort: !Ref VpnPort
+      CidrIp: !Ref AllowedIngressCidr3
+      Description: 'VPN traffic from allowed CIDR 3'
+
+  VpnIngressRule4:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasCidr4
+    Properties:
+      GroupId: !Ref VpnSecurityGroup
+      IpProtocol: !Ref VpnProtocol
+      FromPort: !Ref VpnPort
+      ToPort: !Ref VpnPort
+      CidrIp: !Ref AllowedIngressCidr4
+      Description: 'VPN traffic from allowed CIDR 4'
+
+  VpnIngressRule5:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasCidr5
+    Properties:
+      GroupId: !Ref VpnSecurityGroup
+      IpProtocol: !Ref VpnProtocol
+      FromPort: !Ref VpnPort
+      ToPort: !Ref VpnPort
+      CidrIp: !Ref AllowedIngressCidr5
+      Description: 'VPN traffic from allowed CIDR 5'
 
   VpnInstanceRole:
     Type: AWS::IAM::Role
@@ -179,7 +254,10 @@ Resources:
       Roles:
         - !Ref VpnInstanceRole
 
-  # Launch Template for Spot instances
+  # Launch Template shared by on-demand and spot launches.
+  # Spot uses a one-time request: it cannot be stopped/restarted and is not
+  # relaunched on interruption, but stack deletion cleanly terminates everything
+  # (a persistent request would respawn instances outside CloudFormation control).
   VpnLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
@@ -194,6 +272,13 @@ Resources:
           Arn: !GetAtt VpnInstanceProfile.Arn
         SecurityGroupIds:
           - !Ref VpnSecurityGroup
+        InstanceMarketOptions: !If
+          - UseSpot
+          - MarketType: spot
+            SpotOptions:
+              SpotInstanceType: one-time
+              InstanceInterruptionBehavior: terminate
+          - !Ref AWS::NoValue
         MetadataOptions:
           HttpTokens: required
           HttpPutResponseHopLimit: 1
@@ -208,15 +293,15 @@ Resources:
           Fn::Base64: !Sub |
             #!/bin/bash
             set -euo pipefail
-            
+
             # Update SSM agent if needed
             dnf install -y amazon-ssm-agent || yum install -y amazon-ssm-agent
             systemctl enable amazon-ssm-agent
             systemctl start amazon-ssm-agent
-            
+
             # Set hostname
             hostnamectl set-hostname ${AWS::StackName}-vpn-server
-            
+
             # Log completion
             echo "UserData script completed successfully" > /var/log/userdata-complete.log
         TagSpecifications:
@@ -233,10 +318,8 @@ Resources:
               - Key: CostCenter
                 Value: !Ref AWS::StackName
 
-  # On-demand instance (when UseSpot is false)
-  VpnInstanceOnDemand:
+  VpnInstance:
     Type: AWS::EC2::Instance
-    Condition: UseOnDemand
     Properties:
       LaunchTemplate:
         LaunchTemplateId: !Ref VpnLaunchTemplate
@@ -245,51 +328,6 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-vpn-server'
-        - Key: CostCenter
-          Value: !Ref AWS::StackName
-
-  # Spot Fleet for Spot instances (when UseSpot is true)
-  VpnSpotFleet:
-    Type: AWS::EC2::SpotFleet
-    Condition: UseSpot
-    Properties:
-      SpotFleetRequestConfigData:
-        IamFleetRole: !GetAtt SpotFleetRole.Arn
-        TargetCapacity: 1
-        TerminateInstancesWithExpiration: false
-        Type: maintain
-        LaunchTemplateConfigs:
-          - LaunchTemplateSpecification:
-              LaunchTemplateId: !Ref VpnLaunchTemplate
-              Version: !GetAtt VpnLaunchTemplate.LatestVersionNumber
-            Overrides:
-              - SubnetId: !Ref PublicSubnet
-        TagSpecifications:
-          - ResourceType: spot-fleet-request
-            Tags:
-              - Key: Name
-                Value: !Sub '${AWS::StackName}-spot-fleet'
-              - Key: CostCenter
-                Value: !Ref AWS::StackName
-
-  # IAM Role for Spot Fleet
-  SpotFleetRole:
-    Type: AWS::IAM::Role
-    Condition: UseSpot
-    Properties:
-      RoleName: !Sub '${AWS::StackName}-spot-fleet-role'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: spotfleet.amazonaws.com
-            Action: 'sts:AssumeRole'
-      ManagedPolicyArns:
-        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetTaggingRole'
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-spot-fleet-role'
         - Key: CostCenter
           Value: !Ref AWS::StackName
 
@@ -304,44 +342,26 @@ Resources:
         - Key: CostCenter
           Value: !Ref AWS::StackName
 
-  # EIP Association for On-Demand instance
-  VpnEIPAssociationOnDemand:
+  VpnEIPAssociation:
     Type: AWS::EC2::EIPAssociation
     Condition: ShouldAllocateEIP
-    DependsOn: VpnInstanceOnDemand
     Properties:
       AllocationId: !GetAtt VpnEIP.AllocationId
-      InstanceId: !If
-        - UseOnDemand
-        - !Ref VpnInstanceOnDemand
-        - !Ref AWS::NoValue
+      InstanceId: !Ref VpnInstance
 
 Outputs:
   InstanceId:
-    Description: 'EC2 instance ID of the VPN server (for on-demand instances)'
-    Value: !If
-      - UseOnDemand
-      - !Ref VpnInstanceOnDemand
-      - 'spot-fleet-managed'
+    Description: 'EC2 instance ID of the VPN server'
+    Value: !Ref VpnInstance
     Export:
       Name: !Sub '${AWS::StackName}-InstanceId'
-
-  SpotFleetId:
-    Description: 'Spot Fleet Request ID (for spot instances)'
-    Condition: UseSpot
-    Value: !Ref VpnSpotFleet
-    Export:
-      Name: !Sub '${AWS::StackName}-SpotFleetId'
 
   PublicIp:
     Description: 'Public IP address of the VPN server'
     Value: !If
-      - UseOnDemand
-      - !If
-        - ShouldAllocateEIP
-        - !Ref VpnEIP
-        - !GetAtt VpnInstanceOnDemand.PublicIp
-      - 'spot-fleet-managed'
+      - ShouldAllocateEIP
+      - !Ref VpnEIP
+      - !GetAtt VpnInstance.PublicIp
     Export:
       Name: !Sub '${AWS::StackName}-PublicIp'
 
@@ -350,6 +370,12 @@ Outputs:
     Value: !Ref AllocateEIP
     Export:
       Name: !Sub '${AWS::StackName}-HasElasticIP'
+
+  IsSpotInstance:
+    Description: 'Boolean indicating whether the instance is a Spot instance'
+    Value: !Ref UseSpotInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-IsSpotInstance'
 
   VpcId:
     Description: 'VPC ID'
