@@ -1,0 +1,6 @@
+# Local working files
+post.md
+.claude/
+
+# Generated VPN client configurations
+another_betterthannothing_vpn_config/
